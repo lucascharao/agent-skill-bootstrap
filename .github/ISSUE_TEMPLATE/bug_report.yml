@@ -1,0 +1,29 @@
+name: Bug report
+description: Report a reproducible problem
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    attributes:
+      label: Summary
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Environment
+      placeholder: macOS 15, Node.js 22.20, project/native
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Minimal steps without credentials or private data
+    validations:
+      required: true

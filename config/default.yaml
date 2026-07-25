@@ -1,0 +1,33 @@
+version: 1
+scope: project
+mode: native
+agents:
+  - claude-code
+  - codex
+  - grok
+discovery:
+  provider: auto
+  api_base_url: https://skills.sh
+  token_env: VERCEL_OIDC_TOKEN
+  query_limit: 10
+  discovery_origins:
+    - https://skills.sh
+  credential_origins:
+    - https://skills.sh
+security:
+  require_audit: true
+  allowed_risk_levels:
+    - NONE
+    - LOW
+  trusted_owners:
+    - anthropics
+    - expo
+    - openai
+    - supabase
+    - vercel-labs
+  relevance_threshold: 0.7
+  minimum_query_coverage: 0.5
+  max_automatic_installs: 5
+runtime:
+  cache_ttl_hours: 24
+  hook_timeout_seconds: 30

@@ -1,0 +1,70 @@
+{
+  "name": "agent-skill-bootstrap",
+  "version": "0.1.0",
+  "description": "Detect a project and install only the agent skills it needs before Claude Code, Codex, or Grok starts.",
+  "type": "module",
+  "bin": {
+    "agent-skill-bootstrap": "./dist/cli.js",
+    "asb": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "config",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check"
+  },
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "keywords": [
+    "agent-skills",
+    "skills.sh",
+    "claude-code",
+    "codex",
+    "grok",
+    "ai-agents",
+    "developer-tools",
+    "cli"
+  ],
+  "author": "Lucas Charao",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucascharao/agent-skill-bootstrap.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lucascharao/agent-skill-bootstrap/issues"
+  },
+  "homepage": "https://github.com/lucascharao/agent-skill-bootstrap#readme",
+  "dependencies": {
+    "@clack/prompts": "^1.0.0",
+    "skills": "1.5.19",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "@vitest/coverage-v8": "^4.0.15",
+    "eslint": "^9.39.1",
+    "prettier": "^3.7.4",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vitest": "^4.0.15"
+  }
+}
