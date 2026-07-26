@@ -15,7 +15,7 @@ import type { BootstrapConfig } from "./config.js";
 import type { RuntimeInstall } from "./runtime.js";
 import type { Agent, Scope } from "./types.js";
 
-const MARKER = "agent-skill-bootstrap:owned";
+export const MARKER = "agent-skill-bootstrap:owned";
 
 function quote(value: string): string {
   return `"${value.replaceAll('"', '\\"')}"`;
@@ -142,4 +142,26 @@ export function installHooks(
     changed.push(relative(projectRoot, path));
   }
   return changed;
+}
+
+export function removeOwnedHook(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const original = readFileSync(path, "utf8");
+  const value = JSON.parse(original) as Record<string, unknown>;
+  const hooks = value.hooks as Record<string, unknown> | undefined;
+  if (!hooks) return false;
+  let changed = false;
+  for (const event of ["SessionStart", "UserPromptSubmit"]) {
+    const entries = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+    const filtered = entries.filter((item) => !JSON.stringify(item).includes(MARKER));
+    if (filtered.length !== entries.length) {
+      hooks[event] = filtered;
+      changed = true;
+    }
+  }
+  if (!changed) return false;
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+  return true;
 }

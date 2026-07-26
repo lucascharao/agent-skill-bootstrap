@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { briefingContext, createBriefing, persistBriefing } from "../src/briefing.js";
 import { detectProject } from "../src/detection.js";
@@ -10,6 +10,25 @@ const cleanups: Array<() => void> = [];
 afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()));
 
 describe("project briefing and generated skills", () => {
+  it.each(["null", "[]", '"primitive"', "42", "true"])(
+    "treats a non-object package manifest as empty: %s",
+    (contents) => {
+      const fixture = temporaryProject();
+      cleanups.push(fixture.cleanup);
+      writeFileSync(join(fixture.root, "package.json"), contents);
+
+      const briefing = createBriefing(fixture.root, {
+        root: fixture.root,
+        signals: [],
+        fingerprint: "detection",
+      });
+
+      expect(briefing.projectName).toBe(basename(fixture.root));
+      expect(briefing.projectType).toBe("software-project");
+      expect(briefing.workspaces).toEqual([]);
+    },
+  );
+
   it("creates a deterministic briefing from bounded manifest data", () => {
     const fixture = temporaryProject();
     cleanups.push(fixture.cleanup);
@@ -33,6 +52,33 @@ describe("project briefing and generated skills", () => {
     expect(first.projectType).toBe("cli");
     expect(first.workspaces).toEqual(["apps/*", "packages/*"]);
     expect(JSON.stringify(first)).not.toContain("must-not-appear");
+  });
+
+  it("sorts technologies canonically before fingerprinting", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    writeFileSync(
+      join(fixture.root, "package.json"),
+      JSON.stringify({ name: "ordered", dependencies: { react: "19.0.0" } }),
+    );
+    writeFileSync(join(fixture.root, "tsconfig.json"), "{}");
+    const detection = detectProject(fixture.root);
+    const reversed = {
+      ...detection,
+      signals: [...detection.signals].reverse(),
+    };
+
+    const first = createBriefing(fixture.root, detection);
+    const second = createBriefing(fixture.root, reversed);
+    const changed = createBriefing(fixture.root, {
+      ...detection,
+      signals: detection.signals.map((signal, index) =>
+        index === 0 ? { ...signal, confidence: signal.confidence - 1 } : signal,
+      ),
+    });
+
+    expect(first).toEqual(second);
+    expect(first.fingerprint).not.toBe(changed.fingerprint);
   });
 
   it("renders adversarial manifest values only as bounded untrusted data", () => {

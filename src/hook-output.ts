@@ -4,19 +4,26 @@ import type { SyncResult } from "./types.js";
 const MAX_HOOK_VALUE_LENGTH = 1_000;
 
 function boundedHookValue(value: string): string {
-  return Array.from(value)
-    .slice(0, MAX_HOOK_VALUE_LENGTH)
-    .map((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return code <= 31 || (code >= 127 && code <= 159)
+  let output = "";
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    const encoded =
+      code <= 31 || (code >= 127 && code <= 159)
         ? `\\u${code.toString(16).padStart(4, "0")}`
         : character;
-    })
-    .join("");
+    if (output.length + encoded.length > MAX_HOOK_VALUE_LENGTH) break;
+    output += encoded;
+  }
+  return output;
 }
 
 function stringifyThrown(value: unknown): string {
-  if (value instanceof Error) return boundedHookValue(value.message);
+  if (value instanceof Error) {
+    const message: unknown = value.message;
+    return typeof message === "string" && message.length > 0
+      ? boundedHookValue(message)
+      : "Error";
+  }
   if (typeof value === "string") return boundedHookValue(value);
   if (value === null) return "null";
   if (value === undefined) return "undefined";

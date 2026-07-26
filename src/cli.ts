@@ -20,7 +20,7 @@ import {
   type BootstrapConfig,
 } from "./config.js";
 import { detectProject } from "./detection.js";
-import { hookPath, installHooks } from "./hooks.js";
+import { hookPath, installHooks, removeOwnedHook } from "./hooks.js";
 import { inventory } from "./inventory.js";
 import {
   analyzeManagedSkills,
@@ -411,30 +411,6 @@ async function runAgent(
     maintain: true,
   });
   process.exitCode = await spawnAgent(target.executable, passthrough, options.root);
-}
-
-function removeOwnedHook(path: string): boolean {
-  if (!existsSync(path)) return false;
-  const original = readFileSync(path, "utf8");
-  const value = JSON.parse(original) as Record<string, unknown>;
-  const hooks = value.hooks as Record<string, unknown> | undefined;
-  if (!hooks) return false;
-  let changed = false;
-  for (const event of ["SessionStart", "UserPromptSubmit"]) {
-    const entries = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-    const filtered = entries.filter(
-      (item) => !JSON.stringify(item).includes("agent-skill-bootstrap:owned"),
-    );
-    if (filtered.length !== entries.length) {
-      hooks[event] = filtered;
-      changed = true;
-    }
-  }
-  if (!changed) return false;
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
-  return true;
 }
 
 function uninstall(options: CliOptions): void {

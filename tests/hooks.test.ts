@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.js";
-import { hookPath, installHooks } from "../src/hooks.js";
+import { hookPath, installHooks, MARKER, removeOwnedHook } from "../src/hooks.js";
 import type { RuntimeInstall } from "../src/runtime.js";
 import { temporaryProject } from "./helpers.js";
 
@@ -82,5 +82,34 @@ describe("hook installation", () => {
       expect(value.hooks.SessionStart).toHaveLength(1);
       expect(value.hooks.UserPromptSubmit).toHaveLength(1);
     }
+  });
+
+  it("removes only hooks carrying the shared ownership marker", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const path = hookPath("codex", "project", fixture.root, fixture.home);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            { hooks: [{ command: `owned --owner ${MARKER}` }] },
+            { hooks: [{ command: "user-hook" }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ command: `owned --owner ${MARKER}` }] }],
+        },
+      }),
+    );
+
+    expect(removeOwnedHook(path)).toBe(true);
+    const value = JSON.parse(readFileSync(path, "utf8")) as {
+      hooks: { SessionStart: unknown[]; UserPromptSubmit: unknown[] };
+    };
+    expect(value.hooks.SessionStart).toHaveLength(1);
+    expect(JSON.stringify(value)).toContain("user-hook");
+    expect(value.hooks.UserPromptSubmit).toHaveLength(0);
+    expect(JSON.stringify(value)).not.toContain(MARKER);
+    expect(removeOwnedHook(path)).toBe(false);
   });
 });
