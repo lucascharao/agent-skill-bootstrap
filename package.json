@@ -51,7 +51,7 @@
   "homepage": "https://github.com/lucascharao/agent-skill-bootstrap#readme",
   "dependencies": {
     "@clack/prompts": "^1.0.0",
-    "skills": "1.5.19",
+    "skills": "1.5.20",
     "yaml": "^2.8.1",
     "zod": "^4.1.12"
   },
