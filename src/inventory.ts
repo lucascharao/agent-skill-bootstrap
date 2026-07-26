@@ -1,8 +1,17 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
-import { skillRoot } from "./paths.js";
+import { assertNoSymlinkPath } from "./fs-safety.js";
+import { directoryDigest } from "./install.js";
+import { codexHome, skillRoot } from "./paths.js";
 import { AGENTS, type Agent, type InstalledSkill, type Scope } from "./types.js";
 
 const ManifestSchema = z.object({
@@ -23,6 +32,30 @@ interface ExternalLockEntry {
   computedHash?: string;
 }
 
+function externalDirectoryDigest(root: string): string {
+  // This intentionally mirrors skills@1.5.19 computeSkillFolderHash, whose
+  // computedHash has no separators. It is not our managed snapshot digest.
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Refusing symlinked external skill content: ${path}`);
+      }
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) files.push(path);
+    }
+  };
+  walk(root);
+  const hash = createHash("sha256");
+  for (const path of files.sort((left, right) => left.localeCompare(right))) {
+    hash.update(path.slice(root.length + 1).replaceAll("\\", "/"));
+    hash.update(readFileSync(path));
+  }
+  return hash.digest("hex");
+}
+
 function readExternalLocks(
   scope: Scope,
   projectRoot: string,
@@ -32,6 +65,12 @@ function readExternalLocks(
   const paths = [
     join(base, ".agents", ".skill-lock.json"),
     join(base, "skills-lock.json"),
+    ...(scope === "global"
+      ? [
+          join(codexHome(home), ".skill-lock.json"),
+          join(codexHome(home), "skills-lock.json"),
+        ]
+      : []),
   ];
   const skills: Record<string, ExternalLockEntry> = {};
   for (const path of paths) {
@@ -48,10 +87,91 @@ function readExternalLocks(
   return skills;
 }
 
+function canonicalGlobalSkillPath(slug: string, home?: string): string {
+  return join(home ?? homedir(), ".agents", "skills", slug);
+}
+
+function validExternalBinding(
+  path: string,
+  root: string,
+  slug: string,
+  external: ExternalLockEntry,
+  agent: Agent,
+  scope: Scope,
+  home?: string,
+): InstalledSkill | null {
+  try {
+    if (!external.source || !existsSync(path)) return null;
+    const canonical = canonicalGlobalSkillPath(slug, home);
+    let contentPath = path;
+
+    if (lstatSync(path).isSymbolicLink()) {
+      if (scope !== "global" || !external.skillFolderHash) return null;
+      assertNoSymlinkPath(dirname(path), root);
+      assertNoSymlinkPath(canonical, home ?? homedir());
+      if (realpathSync(path) !== realpathSync(canonical)) return null;
+      contentPath = canonical;
+    } else {
+      assertNoSymlinkPath(path, root);
+    }
+
+    if (!existsSync(join(contentPath, "SKILL.md"))) return null;
+    const digest = externalDirectoryDigest(contentPath);
+    if (external.computedHash && digest !== external.computedHash) return null;
+    if (!external.computedHash && !(scope === "global" && external.skillFolderHash)) {
+      return null;
+    }
+
+    return {
+      id: `${external.source}/${slug}`,
+      slug,
+      source: external.source,
+      hash: digest,
+      agent,
+      scope,
+      path,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function readManifest(skillPath: string): InstallManifest | null {
   const manifestPath = join(skillPath, ".agent-skill-bootstrap.json");
   try {
     return ManifestSchema.parse(JSON.parse(readFileSync(manifestPath, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+export function validManagedBinding(
+  skillPath: string,
+  expected?: { id: string; agent: Agent; scope: Scope },
+  boundary = dirname(skillPath),
+): InstalledSkill | null {
+  try {
+    if (
+      !existsSync(skillPath) ||
+      lstatSync(skillPath).isSymbolicLink() ||
+      !existsSync(join(skillPath, "SKILL.md"))
+    ) {
+      return null;
+    }
+    assertNoSymlinkPath(skillPath, boundary);
+    const manifest = readManifest(skillPath);
+    if (
+      !manifest ||
+      (expected &&
+        (manifest.id !== expected.id ||
+          manifest.agent !== expected.agent ||
+          manifest.scope !== expected.scope))
+    ) {
+      return null;
+    }
+    const digest = directoryDigest(skillPath);
+    if (!manifest.hash || digest !== manifest.hash) return null;
+    return { ...manifest, path: skillPath };
   } catch {
     return null;
   }
@@ -66,29 +186,55 @@ export function inventory(
   const externalLocks = readExternalLocks(scope, projectRoot, home);
   for (const agent of AGENTS) {
     const root = skillRoot(agent, scope, projectRoot, home);
-    if (!existsSync(root)) continue;
-    for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      const path = join(root, entry.name);
-      const manifest = readManifest(path);
-      if (manifest && manifest.agent === agent && manifest.scope === scope) {
-        installed.push({ ...manifest, path });
+    const names = new Set<string>();
+    if (existsSync(root)) {
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (entry.isDirectory() || entry.isSymbolicLink()) names.add(entry.name);
+      }
+    }
+    if (scope === "global" && agent === "codex") {
+      const canonicalRoot = dirname(canonicalGlobalSkillPath("placeholder", home));
+      if (existsSync(canonicalRoot)) {
+        for (const entry of readdirSync(canonicalRoot, { withFileTypes: true })) {
+          if (entry.isDirectory() && !entry.isSymbolicLink()) names.add(entry.name);
+        }
+      }
+    }
+    for (const name of names) {
+      const rootPath = join(root, name);
+      const path =
+        existsSync(rootPath) || lstatExists(rootPath)
+          ? rootPath
+          : canonicalGlobalSkillPath(name, home);
+      const managed = validManagedBinding(path, undefined, root);
+      if (managed && managed.agent === agent && managed.scope === scope) {
+        installed.push(managed);
         continue;
       }
-      const external = externalLocks[entry.name];
-      if (!external?.source || !existsSync(join(path, "SKILL.md"))) continue;
-      installed.push({
-        id: `${external.source}/${entry.name}`,
-        slug: entry.name,
-        source: external.source,
-        hash: external.skillFolderHash ?? external.computedHash ?? null,
+      const external = externalLocks[name];
+      if (!external) continue;
+      const valid = validExternalBinding(
+        path,
+        path === rootPath ? root : dirname(path),
+        name,
+        external,
         agent,
         scope,
-        path,
-      });
+        home,
+      );
+      if (valid) installed.push(valid);
     }
   }
   return installed;
+}
+
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function alreadyInstalled(

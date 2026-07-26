@@ -1,57 +1,62 @@
-# ADR 0001: Hybrid lifecycle bootstrap
+# ADR 0001: Native SessionStart bootstrap with safe local fallback
 
 Status: Accepted
 
-Date: 2026-07-25
+Date: 2026-07-26
 
 ## Context
 
-The product must install relevant agent skills before development begins in
-Claude Code, Codex, and Grok Build. The hosts support lifecycle hooks, but their
-trust, output, and refresh behavior differ. Shadowing vendor executables would
-make ordering deterministic but introduces unacceptable operational risk.
-
-The skills.sh API v1 also requires Vercel OIDC, which is not normally present on
-a local workstation.
+The product must prepare a project briefing and required skills before
+development begins. Claude Code and Codex expose startup hooks, but both retain
+host trust and policy controls. The skills.sh API requires Vercel OIDC and
+cannot be assumed on a local workstation. Search-only CLI results point to
+mutable remote sources and cannot justify automatic execution.
 
 ## Decision
 
-Use vendor-native lifecycle hooks backed by a shared idempotent sync engine.
-Expose the same engine through explicit `sync`, `scan`, and `doctor` commands.
-Use the authenticated API v1 when a token is available and the official
-`skills` CLI as the local fallback.
+Use one vendor-native `SessionStart` hook backed by a shared fail-closed sync
+engine. Do not install `UserPromptSubmit` in 0.1 and do not shadow the `claude`
+or `codex` executable.
 
-Do not create command shims named `claude`, `codex`, or `grok`. Do not bypass
-hook trust.
+Resolve the project from the event `cwd` (or Claude's official project
+environment) and enforce the configured boundary. Use exact structured hook
+ownership, compare-and-swap, atomic replacement, and symlink-safe managed
+paths.
 
-Copy the compiled runtime into a pinned, owned project or user directory during
-initialization so hooks remain offline-capable after the transient `npx`
-process exits.
+Use the authenticated skills.sh API only when an immutable snapshot and
+acceptable audit are available. The pinned official CLI may discover
+candidates, but its mutable result is never materialized automatically.
+Generate a deterministic instruction-only project skill when no admitted
+snapshot or verified existing binding is available.
 
-Offer `run <agent>` as the strict deterministic mode. Native hooks are the
-best-effort default; strict mode completes sync before spawning the agent.
+Cache entries are hints. Before reuse, revalidate every expected agent binding,
+ownership manifest, file, and content digest.
+
+Support only Claude Code and Codex on macOS and Linux in version 0.1. Preserve
+both project and current-user scopes because the packaged smoke test proves all
+four host/scope combinations.
 
 ## Consequences
 
 Positive:
 
-- Native integration without taking over the user's `PATH`.
-- Consistent behavior across automatic and manual execution.
-- Safe fail-open degradation in native hook mode for offline and managed
-  environments; strict mode remains intentionally fail-closed.
-- Clear separation between detection, discovery, policy, and installation.
+- One automatic setup followed by native startup behavior
+- No executable shadowing or shell-profile changes
+- No mutable remote code installed by the hook
+- Cache cannot create a false-ready state after local mutation
+- Existing third-party hooks and unmanaged skills remain untouched
+- Public contract matches executable CI evidence
 
 Negative:
 
-- Trust approval remains a required user step.
-- Automatic behavior cannot be guaranteed where hooks are disabled.
-- A runtime that does not refresh its skill inventory may require one restart.
-- The first release uses a GitHub npm spec until the package is published to the
-  public npm registry.
+- Initial host trust approval is unavoidable
+- A host that disables hooks is unsupported
+- Corrupt occupied managed destinations stop startup until repaired
+- API-unavailable machines receive local instruction-only fallbacks instead of
+  remote catalog code
 
-## Alternatives
+## Exclusions
 
-- Vendor-command wrappers: rejected due to executable shadowing and IDE gaps.
-- Hooks only: rejected because it lacks recovery and diagnostics.
-- Background daemon: rejected for v1 due to persistence, security, and support
-  complexity.
+Grok Build is excluded because its passive startup output does not prove
+first-response context loading. Windows is excluded until the packaged smoke
+matrix runs on and verifies that platform.

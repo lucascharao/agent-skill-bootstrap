@@ -1,18 +1,14 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname } from "node:path";
-import { statePath } from "./paths.js";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { safeAtomicWrite } from "./fs-safety.js";
+import { canonicalProjectRoot, statePath } from "./paths.js";
 import type { Scope } from "./types.js";
 
 interface ProjectState {
   fingerprint: string;
   syncedAt: string;
+  skillIds: string[];
 }
 
 interface State {
@@ -21,7 +17,7 @@ interface State {
 }
 
 function key(root: string): string {
-  return createHash("sha256").update(root).digest("hex");
+  return createHash("sha256").update(canonicalProjectRoot(root)).digest("hex");
 }
 
 function read(path: string): State {
@@ -50,13 +46,24 @@ export function markSynced(
   scope: Scope,
   root: string,
   fingerprint: string,
+  skillIds: string[] = [],
   home?: string,
 ): void {
   const path = statePath(scope, root, home);
   const value = read(path);
-  value.projects[key(root)] = { fingerprint, syncedAt: new Date().toISOString() };
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
+  value.projects[key(root)] = {
+    fingerprint,
+    syncedAt: new Date().toISOString(),
+    skillIds: [...new Set(skillIds)].sort(),
+  };
+  safeAtomicWrite(
+    path,
+    `${JSON.stringify(value, null, 2)}\n`,
+    scope === "global" ? (home ?? homedir()) : root,
+  );
+}
+
+export function cachedSkillIds(scope: Scope, root: string, home?: string): string[] {
+  const entry = read(statePath(scope, root, home)).projects[key(root)];
+  return Array.isArray(entry?.skillIds) ? entry.skillIds : [];
 }

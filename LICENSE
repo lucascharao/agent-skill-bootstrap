@@ -1,21 +1,71 @@
-MIT License
+Agent Skill Bootstrap Source-Available License 1.0
 
-Copyright (c) 2026 Lucas Charao
+Copyright (c) 2026 Lucas Charao. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Definitions
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+"Software" means the Agent Skill Bootstrap source code, compiled code,
+documentation, and other files distributed by the Licensor under this license.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+"Generated Output" means configuration, project briefings, metadata, and skills
+created by executing an authorized copy of the Software for a user's project.
+
+2. Permission to Install and Use
+
+Subject to this license, the Licensor grants you a limited, non-exclusive,
+non-transferable, revocable permission to obtain an official copy of the
+Software and install and execute that copy, without modifying the Software, for
+your own internal personal or business purposes.
+
+You may configure the Software through its documented interfaces. You may use,
+modify, and share Generated Output as part of your own project, provided that
+the Generated Output does not contain or reproduce a substantial portion of the
+Software.
+
+3. Restrictions
+
+Except with the Licensor's prior written permission, you may not:
+
+- modify, adapt, translate, merge, or create derivative works of the Software;
+- redistribute, republish, sublicense, sell, rent, lease, host, or otherwise
+  make the Software or a substantial portion of it available to any third
+  party;
+- remove or alter copyright, license, attribution, or proprietary notices;
+- use the Software or its source code to create or provide a competing product
+  or service; or
+- represent that the Software is open source or that this license is an
+  open-source license.
+
+Possession of source code, access to a public repository, or access to a public
+package does not grant rights beyond those stated in this license.
+
+4. Third-Party Components
+
+Third-party packages and components included with or used by the Software
+remain governed by their respective licenses and notices. This license does not
+replace, restrict, or grant additional rights under those third-party licenses.
+
+5. Ownership
+
+The Software is licensed, not sold. The Licensor retains all right, title, and
+interest in and to the Software. All rights not expressly granted are reserved.
+
+6. Termination
+
+Your permission under this license terminates automatically if you breach its
+terms. Upon termination, you must stop using and delete your copies of the
+Software, except to the extent retention is required by applicable law.
+
+7. Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT
+PERMITTED BY LAW, THE LICENSOR WILL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY ARISING FROM OR RELATED TO THE SOFTWARE OR ITS USE.
+
+8. Separate Permission
+
+For modification, redistribution, sublicensing, commercial resale, hosting, or
+other rights not granted above, obtain separate written permission from the
+Licensor.

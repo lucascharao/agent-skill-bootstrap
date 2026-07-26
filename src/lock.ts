@@ -1,13 +1,13 @@
 import {
   closeSync,
   existsSync,
-  mkdirSync,
   openSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { assertNoSymlinkPath, ensureSafeDirectory } from "./fs-safety.js";
 
 const POLL_MS = 100;
 
@@ -15,8 +15,10 @@ export async function withLock<T>(
   path: string,
   timeoutMs: number,
   work: () => Promise<T>,
+  boundary = dirname(path),
 ): Promise<T> {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  ensureSafeDirectory(dirname(path), boundary);
+  assertNoSymlinkPath(path, boundary);
   const started = Date.now();
   while (true) {
     try {
@@ -29,11 +31,15 @@ export async function withLock<T>(
       try {
         const lock = JSON.parse(readFileSync(path, "utf8")) as { createdAt?: number };
         if (Date.now() - (lock.createdAt ?? 0) > 120_000) {
+          assertNoSymlinkPath(path, boundary);
           rmSync(path);
           continue;
         }
       } catch {
-        if (existsSync(path)) rmSync(path);
+        if (existsSync(path)) {
+          assertNoSymlinkPath(path, boundary);
+          rmSync(path);
+        }
         continue;
       }
       if (Date.now() - started >= timeoutMs) {
@@ -45,6 +51,9 @@ export async function withLock<T>(
   try {
     return await work();
   } finally {
-    if (existsSync(path)) rmSync(path);
+    if (existsSync(path)) {
+      assertNoSymlinkPath(path, boundary);
+      rmSync(path);
+    }
   }
 }

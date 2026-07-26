@@ -1,94 +1,129 @@
 # Agent Skill Bootstrap
 
-Detect the technology stack in a project and install only the relevant
-[skills.sh](https://skills.sh) agent skills before Claude Code, Codex, or Grok
-Build starts working.
+Prepare the project briefing and required skills before Claude Code or Codex
+starts development.
 
-Agent Skill Bootstrap is a local-first CLI. It can be installed for one project
-or for the current user account, checks global skills before adding project
-copies, and preserves existing agent hook configuration.
+Agent Skill Bootstrap is a local-first CLI distributed through `npx`. After one
+setup, an owned `SessionStart` hook detects the project, checks the
+[skills.sh](https://skills.sh) catalog, validates existing bindings, installs
+only immutable audited snapshots, and creates a safe project-local skill when
+the catalog cannot provide one.
 
-> Status: `0.1.0` pre-release. The repository is npm-ready; until the first npm
-> publication, run it directly from GitHub.
+## Supported contract for 0.1.0
 
-## Why
+- Hosts: Claude Code and Codex
+- Operating systems: macOS and Linux
+- Scopes: current project or current user
+- Lifecycle event: `SessionStart`
+- Trust: the user must approve the hook in the host
+- Failure behavior: preparation errors return `continue: false`
 
-Agent skill libraries are useful, but manually selecting and installing skills
-for every repository is repetitive. Installing everything globally creates
-noise and makes agent context harder to reason about.
+Windows and Grok Build are not promised by this release. The project does not
+bypass host trust, enterprise policy, disabled hooks, or unavailable
+filesystems.
 
-This tool uses project evidence—manifests, dependencies, and configuration
-files—to build a deterministic stack fingerprint. It searches the skills.sh
-catalog, applies relevance and security policy, and installs only missing skill
-bindings.
-
-## Quick start
+## Install once
 
 Requirements:
 
-- Node.js 22.20 or newer
-- Git for skills discovered through the official CLI fallback
-- At least one supported agent: Claude Code, Codex, or Grok Build
+- Node.js 22.20.0 or newer
+- Claude Code, Codex, or both
 
-Run the interactive installer:
+After the npm release:
+
+```bash
+npx agent-skill-bootstrap
+```
+
+Until then:
 
 ```bash
 npx github:lucascharao/agent-skill-bootstrap
 ```
 
-The installer asks:
+The installer asks only:
 
-1. Project or global scope
-2. Native or strict startup mode
-3. Which agents should receive skills
+1. Whether automation belongs to this project or the current user
+2. Which supported agents should use it
 
-`global` means the current user account. It never installs into a system root
-and never requires `sudo`.
+It then installs a pinned persistent runtime, merges one owned `SessionStart`
+entry without replacing unrelated hooks, creates the first briefing, and runs
+the first safe skill cycle.
 
-For automation:
+## Automatic startup flow
 
-```bash
-npx github:lucascharao/agent-skill-bootstrap init \
-  --scope project \
-  --mode native \
-  --agents claude-code,codex,grok \
-  --non-interactive
-```
+After the host approves the hook, every supported session start:
 
-## Startup modes
+1. Resolves the project from the trusted event `cwd`
+2. Detects technologies from bounded manifests and known configuration files
+3. Builds a deterministic project briefing and fingerprint
+4. Revalidates cached bindings, manifests, files, and content digests
+5. Searches skills.sh through its authenticated API or pinned official CLI
+6. Admits only immutable API snapshots that pass audit and relevance policy
+7. Reuses an existing verified global or local binding when available
+8. Creates an instruction-only project skill when no safe snapshot qualifies
+9. Quarantines obsolete package-owned project skills
+10. Injects only the sanitized briefing and verified managed skill IDs
 
-### Native hooks
+The official CLI is used for discovery only when an immutable audited API
+snapshot is unavailable. A mutable branch, tag, or repository result is never
+materialized automatically.
 
-Native mode installs vendor-supported `SessionStart` hooks. It is automatic and
-fail-open: an unavailable catalog does not block the agent session.
+## Installation paths
 
-Hosts decide when newly installed skills become visible. A first session may
-need one restart. Project hooks may also require explicit trust in Codex and
-Grok Build.
+| Host        | Project          | Current user                     |
+| ----------- | ---------------- | -------------------------------- |
+| Claude Code | `.claude/skills` | `~/.claude/skills`               |
+| Codex       | `.agents/skills` | `${CODEX_HOME:-~/.codex}/skills` |
 
-### Strict launcher
+Codex user hooks follow the same home:
+`${CODEX_HOME:-~/.codex}/hooks.json`.
 
-Strict mode completes discovery, policy checks, and installation before it
-spawns the requested agent:
-
-```bash
-agent-skill-bootstrap run codex
-agent-skill-bootstrap run claude -- --model sonnet
-agent-skill-bootstrap run grok
-```
-
-The installer prints a persistent runtime command when the package itself was
-started through transient `npx`. Strict mode fails closed; it does not start the
-agent if required discovery or audit checks cannot complete.
-
-## Commands
+Global state is isolated per canonical project:
 
 ```text
-agent-skill-bootstrap [init]   Configure runtime, hooks, and initial sync
-agent-skill-bootstrap scan     Show detected technologies and evidence
-agent-skill-bootstrap sync     Discover and install missing skills
-agent-skill-bootstrap doctor   Diagnose runtime, hooks, trust, and inventory
-agent-skill-bootstrap run      Synchronize, then start an agent
+~/.config/agent-skill-bootstrap/projects/<project-hash>/
+```
+
+Generated fallback skills always remain inside the project, including when the
+installer itself uses current-user scope.
+
+## Generated fallback skills
+
+When no relevant immutable snapshot passes policy, the CLI generates a small
+deterministic `SKILL.md` from verified project evidence.
+
+Generated skills:
+
+- Contain instructions only, never scripts or executable assets
+- Never read `.env`, credentials, prompt history, or arbitrary source files
+- Remain project-local
+- Carry an Agent Skill Bootstrap ownership manifest and content digest
+- Can be moved only to recoverable quarantine, never automatically deleted
+
+## Automatic maintenance
+
+Only directories with a valid ownership manifest and matching content digest
+are managed. Obsolete skills are moved to:
+
+```text
+.agent-skill-bootstrap/quarantine/
+```
+
+Unmanaged skills and third-party hooks are preserved. A third-party hook merely
+mentioning the package name or marker is not considered owned.
+
+Diagnostic commands are optional:
+
+```bash
+agent-skill-bootstrap scan
+agent-skill-bootstrap sync
+agent-skill-bootstrap analyze
+agent-skill-bootstrap prune --dry-run
+agent-skill-bootstrap prune --yes
+agent-skill-bootstrap quarantine
+agent-skill-bootstrap restore <skill-id-or-slug> --yes
+agent-skill-bootstrap doctor
 agent-skill-bootstrap uninstall --yes
 ```
 
@@ -96,8 +131,7 @@ Useful flags:
 
 ```text
 --scope project|global
---mode native|strict
---agents claude-code,codex,grok
+--agents claude-code,codex
 --root <path>
 --dry-run
 --force
@@ -105,117 +139,67 @@ Useful flags:
 --non-interactive
 ```
 
-Examples:
+## Trust and diagnostics
+
+The installer cannot approve its own hook. `doctor` distinguishes installation
+health from host readiness:
+
+- `supported-and-verified`: reserved for explicit host verification evidence
+- `trust-required`: runtime and hook are installed but host approval is pending
+- `installed-but-unverified`: files exist but the runtime cannot be verified
+- `unsupported`: the host, platform, or installation is outside the 0.1 contract
+
+No success message claims that a host loaded the hook when approval cannot be
+verified.
+
+## Security properties
+
+- Exact structured `--owner` markers for hook update and removal
+- Compare-and-swap plus atomic replacement for hook JSON
+- Symlink rejection for managed boundaries, parents, staging, and destinations
+- Path containment based on platform path semantics, not string prefixes
+- Immutable snapshot, audit, size, file, and content-digest validation
+- Per-project state, cache, briefing, and sync lock
+- Cache invalidation when any required binding or asset changes
+- No shell execution for external process arguments
+- OIDC credentials sent only to exact allowlisted HTTPS origins
+- No telemetry
+
+See [SECURITY.md](SECURITY.md) for the threat model.
+
+## Verification
+
+The CI release gate runs:
 
 ```bash
-agent-skill-bootstrap scan --json
-agent-skill-bootstrap sync --dry-run
-agent-skill-bootstrap sync --force
-agent-skill-bootstrap doctor --json
+npm run format:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run test:coverage
+npm audit --omit=dev
+npm run smoke:package
+npm pack --dry-run
 ```
 
-## How discovery works
+The package smoke installs the real tarball in clean temporary homes and
+exercises init, `SessionStart`, briefing/context creation, safe sync, and
+uninstall for Claude Code and Codex in both declared scopes.
 
-The authenticated skills.sh v1 API is the preferred provider. The API currently
-requires a Vercel OIDC token, normally available as `VERCEL_OIDC_TOKEN`.
+## Repository and license
 
-If no token is available, native mode uses the exact bundled version of the
-official `skills` CLI. Fallback candidates are limited to trusted owners.
-Strict mode does not automatically install unaudited fallback results.
+The public repository is available for source visibility, issue reporting, and
+release verification. External source-code contributions are not accepted.
+Protected branches and pull requests guard the upstream repository.
 
-For API installs, the tool:
-
-1. Searches with a bounded query
-2. Requires stack-specific term and query coverage
-3. Checks partner audit results
-4. Fetches an immutable file snapshot
-5. Validates paths and content limits
-6. Materializes the skill atomically
-
-The official CLI currently has no Grok target. Agent Skill Bootstrap
-materializes a vetted candidate into an isolated temporary directory and copies
-the same checked snapshot into `.grok/skills`.
-
-## Deduplication
-
-Deduplication is evaluated for each stable skill identity and target agent:
-
-- Global inventory is checked before project inventory.
-- Existing official CLI lock files are recognized.
-- An existing Claude binding does not hide a missing Codex or Grok binding.
-- Name-only collisions do not authorize a skip.
-- Repeated syncs are idempotent.
-
-Default skill directories:
-
-| Agent       | Project          | Global             |
-| ----------- | ---------------- | ------------------ |
-| Claude Code | `.claude/skills` | `~/.claude/skills` |
-| Codex       | `.agents/skills` | `~/.agents/skills` |
-| Grok Build  | `.grok/skills`   | `~/.grok/skills`   |
-
-## Configuration
-
-Project configuration:
-
-```text
-.agent-skill-bootstrap/config.yaml
-```
-
-User configuration:
-
-```text
-~/.config/agent-skill-bootstrap/config.yaml
-```
-
-See [`config/default.yaml`](config/default.yaml) for all defaults.
-
-Project configuration cannot weaken the user security floor. In particular, it
-cannot redirect the API, change the credential environment variable, add
-trusted owners, lower relevance thresholds, disable required audits, or
-increase automatic install limits.
-
-## Security
-
-- No shell is used for external process arguments.
-- Authentication is sent only to exact user-allowlisted HTTPS origins.
-- Redirects never forward authorization across origins.
-- External file paths are validated against traversal and size limits.
-- Skills are copied rather than linked.
-- Hook JSON is backed up and atomically updated.
-- Existing hook entries are preserved.
-- Uninstall removes only entries marked as owned by this tool.
-- No telemetry is collected.
-
-Read [SECURITY.md](SECURITY.md) for reporting and threat-model details.
-
-## Honest limitations
-
-No third-party tool can guarantee startup execution when an IDE, enterprise
-policy, sandbox, or agent host disables hooks. Native mode reports that boundary
-instead of bypassing trust. Use strict mode when ordering is a hard
-requirement.
-
-The skills.sh API audit endpoint is not tied to a snapshot revision. Automatic
-API installs therefore fetch and stage one exact detail snapshot after policy
-approval, then verify the staged result before committing it.
-
-## Development
-
-```bash
-npm install
-npm run check
-```
-
-The implementation is TypeScript ESM. Tests never write to real agent
-directories or call live services.
-
-Architecture and decisions:
+Agent Skill Bootstrap is source-available proprietary software, not open
+source. Official unmodified copies may be installed and used under the terms in
+[LICENSE](LICENSE). Modification, derivative works, redistribution,
+sublicensing, resale, or hosted redistribution require prior written
+permission. Generated project output remains available for the user's own
+projects as described by the license.
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Hybrid lifecycle ADR](docs/adr/0001-hybrid-lifecycle-bootstrap.md)
+- [Lifecycle decision](docs/adr/0001-hybrid-lifecycle-bootstrap.md)
 - [Testing strategy](docs/TESTING.md)
-
-## License
-
-[MIT](LICENSE)

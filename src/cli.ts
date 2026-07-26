@@ -1,16 +1,10 @@
 import * as p from "@clack/prompts";
-import { spawn } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { stringify } from "yaml";
+import { hookFailureOutput, hookSuccessOutput } from "./hook-output.js";
 import {
   loadConfig,
   projectConfigPath,
@@ -19,19 +13,32 @@ import {
   type BootstrapConfig,
 } from "./config.js";
 import { detectProject } from "./detection.js";
-import { hookPath, installHooks } from "./hooks.js";
+import {
+  assertNoSymlinkPath,
+  assertWithinBoundary,
+  safeAtomicWrite,
+} from "./fs-safety.js";
+import { resolveHookProjectRoot, type HookEventInput } from "./hook-root.js";
+import { hookPath, installHooks, ownershipMarker, removeOwnedHook } from "./hooks.js";
 import { inventory } from "./inventory.js";
+import {
+  analyzeManagedSkills,
+  listQuarantined,
+  quarantineManagedSkills,
+  restoreQuarantined,
+} from "./maintenance.js";
 import { runtimeRoot } from "./paths.js";
 import {
   assertSupportedNode,
   findSkillsBinary,
   installRuntime,
   nodeSupported,
+  platformSupported,
   runtimeHealthy,
   VERSION,
 } from "./runtime.js";
 import { syncSkills } from "./sync.js";
-import { AGENTS, type Agent, type Mode, type Scope } from "./types.js";
+import { AGENTS, type Agent, type Scope, type SyncResult } from "./types.js";
 
 const HELP = `
 Agent Skill Bootstrap ${VERSION}
@@ -41,13 +48,15 @@ Usage:
   agent-skill-bootstrap scan [--json]
   agent-skill-bootstrap sync [--dry-run] [--force] [--json]
   agent-skill-bootstrap doctor [--json]
-  agent-skill-bootstrap run <claude|codex|grok> -- [agent arguments]
+  agent-skill-bootstrap analyze [--json]
+  agent-skill-bootstrap prune [--dry-run | --yes]
+  agent-skill-bootstrap quarantine [--json]
+  agent-skill-bootstrap restore <skill-id|slug> --yes
   agent-skill-bootstrap uninstall --yes
 
 Options:
   --scope <project|global>       Installation scope
-  --mode <native|strict>        Startup guarantee
-  --agents <list>               claude-code,codex,grok
+  --agents <list>               claude-code,codex
   --root <path>                 Project root (defaults to cwd)
   --non-interactive             Disable prompts
   --dry-run                     Plan without writing skills
@@ -59,7 +68,6 @@ Options:
 
 interface CliOptions {
   scope?: Scope | undefined;
-  mode?: Mode | undefined;
   agents?: Agent[] | undefined;
   root: string;
   nonInteractive: boolean;
@@ -67,6 +75,7 @@ interface CliOptions {
   json: boolean;
   force: boolean;
   yes: boolean;
+  owner?: string | undefined;
 }
 
 function parseAgentList(value: string | undefined): Agent[] | undefined {
@@ -81,19 +90,15 @@ function parseAgentList(value: string | undefined): Agent[] | undefined {
 function parseCli(): {
   command: string;
   positionals: string[];
-  passthrough: string[];
   options: CliOptions;
 } {
-  const separator = process.argv.indexOf("--");
-  const ownArgs = process.argv.slice(2, separator === -1 ? undefined : separator);
-  const passthrough = separator === -1 ? [] : process.argv.slice(separator + 1);
+  const ownArgs = process.argv.slice(2);
   const parsed = parseArgs({
     args: ownArgs,
     allowPositionals: true,
     strict: false,
     options: {
       scope: { type: "string" },
-      mode: { type: "string" },
       agents: { type: "string" },
       root: { type: "string" },
       "non-interactive": { type: "boolean", default: false },
@@ -111,33 +116,26 @@ function parseCli(): {
     return {
       command: "help",
       positionals: [],
-      passthrough,
       options: baseOptions(parsed.values),
     };
   if (parsed.values.version)
     return {
       command: "version",
       positionals: [],
-      passthrough,
       options: baseOptions(parsed.values),
     };
   const positionals = parsed.positionals;
   return {
     command: positionals[0] ?? "init",
     positionals: positionals.slice(1),
-    passthrough,
     options: baseOptions(parsed.values),
   };
 }
 
 function baseOptions(values: Record<string, unknown>): CliOptions {
   const scope = values.scope;
-  const mode = values.mode;
   if (scope !== undefined && scope !== "project" && scope !== "global") {
     throw new Error("Invalid scope");
-  }
-  if (mode !== undefined && mode !== "native" && mode !== "strict") {
-    throw new Error("Invalid mode");
   }
   const agentsValue = typeof values.agents === "string" ? values.agents : undefined;
   const agentValue = typeof values.agent === "string" ? values.agent : undefined;
@@ -149,7 +147,6 @@ function baseOptions(values: Record<string, unknown>): CliOptions {
       : undefined;
   return {
     ...(scope ? { scope } : {}),
-    ...(mode ? { mode } : {}),
     ...(selectedAgents ? { agents: selectedAgents } : {}),
     root: resolve(rootValue),
     nonInteractive: Boolean(values["non-interactive"]),
@@ -157,6 +154,7 @@ function baseOptions(values: Record<string, unknown>): CliOptions {
     json: Boolean(values.json),
     force: Boolean(values.force),
     yes: Boolean(values.yes),
+    ...(typeof values.owner === "string" ? { owner: values.owner } : {}),
   };
 }
 
@@ -181,11 +179,15 @@ function cancelIfNeeded<T>(value: T | symbol): T {
 async function interactiveOptions(
   options: CliOptions,
   config: BootstrapConfig,
-): Promise<{ scope: Scope; mode: Mode; agents: Agent[] }> {
+): Promise<{
+  scope: Scope;
+  mode: BootstrapConfig["mode"];
+  agents: Agent[];
+}> {
   if (options.nonInteractive || !process.stdin.isTTY) {
     return {
       scope: options.scope ?? config.scope,
-      mode: options.mode ?? config.mode,
+      mode: config.mode,
       agents: options.agents ?? config.agents,
     };
   }
@@ -210,26 +212,7 @@ async function interactiveOptions(
         initialValue: config.scope,
       }),
     );
-  const mode =
-    options.mode ??
-    cancelIfNeeded(
-      await p.select<Mode>({
-        message: "Choose the startup guarantee",
-        options: [
-          {
-            value: "native",
-            label: "Native hooks",
-            hint: "automatic, best effort",
-          },
-          {
-            value: "strict",
-            label: "Strict launcher",
-            hint: "sync must finish before the agent starts",
-          },
-        ],
-        initialValue: config.mode,
-      }),
-    );
+  const mode = config.mode;
   const agents =
     options.agents ??
     cancelIfNeeded(
@@ -238,7 +221,6 @@ async function interactiveOptions(
         options: [
           { value: "claude-code", label: "Claude Code" },
           { value: "codex", label: "Codex" },
-          { value: "grok", label: "Grok Build" },
         ],
         initialValues: config.agents,
         required: true,
@@ -247,11 +229,8 @@ async function interactiveOptions(
   return { scope, mode, agents };
 }
 
-function writeConfig(path: string, config: BootstrapConfig): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, stringify(config), { mode: 0o600 });
-  renameSync(temporary, path);
+function writeConfig(path: string, config: BootstrapConfig, boundary: string): void {
+  safeAtomicWrite(path, stringify(config), boundary);
 }
 
 async function init(options: CliOptions): Promise<void> {
@@ -265,10 +244,14 @@ async function init(options: CliOptions): Promise<void> {
     return;
   }
 
-  writeConfig(configPath, config);
+  writeConfig(
+    configPath,
+    config,
+    selected.scope === "global" ? homedir() : options.root,
+  );
   const spinner = options.nonInteractive || options.json ? null : p.spinner();
   spinner?.start("Installing persistent runtime");
-  const runtime = await installRuntime(selected.scope, options.root);
+  const runtime = installRuntime(selected.scope, options.root);
   spinner?.message("Installing lifecycle hooks");
   const hookFiles = installHooks(
     selected.agents,
@@ -285,30 +268,29 @@ async function init(options: CliOptions): Promise<void> {
     config,
     skillsBinary: runtime.skillsBinary,
     force: true,
+    maintain: true,
   });
-  spinner?.stop("Agent Skill Bootstrap is ready");
+  spinner?.stop("Agent Skill Bootstrap is configured");
   const summary = {
     scope: selected.scope,
-    mode: selected.mode,
     agents: selected.agents,
     configPath,
     hookFiles,
     installed: result.installed.map((item) => item.id),
     warnings: result.warnings,
-    strictCommand:
-      selected.mode === "strict"
-        ? `node ${JSON.stringify(runtime.cli)} run <claude|codex|grok>`
-        : undefined,
+    trustRequired: selected.agents,
   };
   if (options.json || options.nonInteractive) output(summary, options.json);
-  else p.outro(`Ready. Installed ${result.installed.length} agent skill binding(s).`);
+  else
+    p.outro(
+      `Configured ${result.installed.length} skill binding(s). Approve the new hooks when Claude Code or Codex asks for trust.`,
+    );
 }
 
-async function sync(options: CliOptions, hook = false): Promise<void> {
+async function sync(options: CliOptions, hook = false): Promise<SyncResult> {
   assertSupportedNode();
   const config = withOverrides(loadConfig(options.root), {
     ...(options.scope ? { scope: options.scope } : {}),
-    ...(options.mode ? { mode: options.mode } : {}),
     ...(options.agents ? { agents: options.agents } : {}),
   });
   const skillsBinary = findSkillsBinary();
@@ -321,8 +303,10 @@ async function sync(options: CliOptions, hook = false): Promise<void> {
     dryRun: options.dryRun,
     force: options.force,
     hook,
+    maintain: hook,
   });
-  output(result, options.json);
+  if (!hook) output(result, options.json);
+  return result;
 }
 
 function scan(options: CliOptions): void {
@@ -336,15 +320,29 @@ function doctor(options: CliOptions): void {
     root: `${runtimePath}/${VERSION}`,
     cli: `${runtimePath}/${VERSION}/cli.js`,
     skillsBinary: `${runtimePath}/${VERSION}/node_modules/skills/bin/cli.mjs`,
+    node: process.execPath,
   };
+  const supported = nodeSupported() && platformSupported();
   const report = {
     ok: true,
+    overallStatus: supported ? "trust-required" : "unsupported",
+    statusDefinitions: {
+      "supported-and-verified":
+        "The host supplied explicit evidence that the exact hook was approved and loaded",
+      "trust-required":
+        "The runtime and hook are healthy, but host approval cannot be inferred",
+      "installed-but-unverified":
+        "Installation files exist, but one or more runtime checks failed",
+      unsupported:
+        "The host, platform, or installation is outside the verified 0.1 contract",
+    },
     node: process.version,
     nodeSupported: nodeSupported(),
+    platform: process.platform,
+    platformSupported: platformSupported(),
     projectRoot: options.root,
     config: {
       scope: config.scope,
-      mode: config.mode,
       agents: config.agents,
     },
     runtime: {
@@ -355,8 +353,16 @@ function doctor(options: CliOptions): void {
       agent,
       path: hookPath(agent, config.scope, options.root),
       exists: existsSync(hookPath(agent, config.scope, options.root)),
-      trustRequired:
-        agent === "codex" || (agent === "grok" && config.scope === "project"),
+      status: !supported
+        ? "unsupported"
+        : existsSync(hookPath(agent, config.scope, options.root)) &&
+            runtimeHealthy(runtime)
+          ? "trust-required"
+          : existsSync(hookPath(agent, config.scope, options.root))
+            ? "installed-but-unverified"
+            : "unsupported",
+      ready: false,
+      verification: `Open /hooks in ${agent} and approve the exact Agent Skill Bootstrap hook definition`,
     })),
     inventory: {
       global: inventory("global", options.root).length,
@@ -365,87 +371,172 @@ function doctor(options: CliOptions): void {
   };
   report.ok =
     report.nodeSupported &&
+    report.platformSupported &&
     report.runtime.healthy &&
     report.hooks.every((hook) => hook.exists);
+  report.overallStatus = !supported
+    ? "unsupported"
+    : report.ok
+      ? "trust-required"
+      : report.hooks.some((hook) => hook.exists)
+        ? "installed-but-unverified"
+        : "unsupported";
   output(report, options.json);
   if (!report.ok) process.exitCode = 1;
 }
 
-function spawnAgent(command: string, args: string[], cwd: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      shell: false,
-      stdio: "inherit",
-      env: { ...process.env, AGENT_SKILL_BOOTSTRAP_STRICT: "1" },
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
-  });
-}
-
-async function runAgent(
-  requested: string | undefined,
-  passthrough: string[],
-  options: CliOptions,
-): Promise<void> {
-  assertSupportedNode();
-  const mapping: Record<string, { agent: Agent; executable: string }> = {
-    claude: { agent: "claude-code", executable: "claude" },
-    "claude-code": { agent: "claude-code", executable: "claude" },
-    codex: { agent: "codex", executable: "codex" },
-    grok: { agent: "grok", executable: "grok" },
-  };
-  const target = requested ? mapping[requested] : undefined;
-  if (!target) throw new Error("run requires claude, codex, or grok");
-  const config = withOverrides(loadConfig(options.root), {
-    mode: "strict",
-    agents: [target.agent],
-    ...(options.scope ? { scope: options.scope } : {}),
-  });
-  await syncSkills({
-    root: options.root,
-    scope: config.scope,
-    agents: [target.agent],
-    config,
-    skillsBinary: findSkillsBinary(),
-    force: true,
-  });
-  process.exitCode = await spawnAgent(target.executable, passthrough, options.root);
-}
-
-function removeOwnedHook(path: string): boolean {
-  if (!existsSync(path)) return false;
-  const original = readFileSync(path, "utf8");
-  const value = JSON.parse(original) as Record<string, unknown>;
-  const hooks = value.hooks as Record<string, unknown> | undefined;
-  const entries = hooks && Array.isArray(hooks.SessionStart) ? hooks.SessionStart : [];
-  if (
-    !hooks ||
-    !entries.some((item) =>
-      JSON.stringify(item).includes("agent-skill-bootstrap:owned"),
-    )
-  ) {
-    return false;
-  }
-  hooks.SessionStart = entries.filter(
-    (item) => !JSON.stringify(item).includes("agent-skill-bootstrap:owned"),
-  );
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
-  return true;
-}
-
 function uninstall(options: CliOptions): void {
   if (!options.yes) throw new Error("uninstall requires --yes");
-  const config = loadConfig(options.root);
+  const config = withOverrides(loadConfig(options.root), {
+    ...(options.scope ? { scope: options.scope } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  });
   const removedHooks = config.agents
-    .map((agent) => hookPath(agent, config.scope, options.root))
-    .filter(removeOwnedHook);
+    .map((agent) => ({
+      agent,
+      path: hookPath(agent, config.scope, options.root),
+    }))
+    .filter(({ agent, path }) =>
+      removeOwnedHook(path, agent, config.scope, options.root),
+    )
+    .map(({ path }) => path);
   const runtime = runtimeRoot(config.scope, options.root);
-  if (existsSync(runtime)) rmSync(runtime, { recursive: true, force: true });
+  if (existsSync(runtime)) {
+    const boundary = config.scope === "global" ? homedir() : options.root;
+    assertWithinBoundary(runtime, boundary);
+    assertNoSymlinkPath(runtime, boundary);
+    rmSync(runtime, { recursive: true, force: true });
+  }
   output({ removedHooks, removedRuntime: runtime }, options.json);
+}
+
+function requiredFromResult(
+  result: SyncResult,
+  agents: Agent[],
+): Map<Agent, Set<string>> {
+  const ids = new Set([
+    ...result.selected.map((candidate) => candidate.id),
+    ...result.generated.map((candidate) => candidate.id),
+  ]);
+  return new Map(agents.map((agent) => [agent, new Set(ids)]));
+}
+
+async function analyze(options: CliOptions): Promise<void> {
+  const config = withOverrides(loadConfig(options.root), {
+    ...(options.scope ? { scope: options.scope } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  });
+  const result = await syncSkills({
+    root: options.root,
+    scope: config.scope,
+    agents: config.agents,
+    config,
+    skillsBinary: findSkillsBinary(),
+    dryRun: true,
+    force: true,
+  });
+  const analysis = analyzeManagedSkills(
+    options.root,
+    requiredFromResult(result, config.agents),
+  );
+  output({ briefing: result.briefing, ...analysis }, options.json);
+}
+
+async function prune(options: CliOptions): Promise<void> {
+  if (!options.dryRun && !options.yes) {
+    throw new Error("prune requires --yes; use --dry-run to preview");
+  }
+  const config = withOverrides(loadConfig(options.root), {
+    ...(options.scope ? { scope: options.scope } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  });
+  const result = await syncSkills({
+    root: options.root,
+    scope: config.scope,
+    agents: config.agents,
+    config,
+    skillsBinary: findSkillsBinary(),
+    dryRun: true,
+    force: true,
+  });
+  const maintenance = quarantineManagedSkills(
+    options.root,
+    requiredFromResult(result, config.agents),
+    { dryRun: options.dryRun },
+  );
+  output(maintenance, options.json);
+}
+
+function restore(idOrSlug: string | undefined, options: CliOptions): void {
+  if (!idOrSlug) throw new Error("restore requires a skill id or slug");
+  if (!options.yes) throw new Error("restore requires --yes");
+  output(restoreQuarantined(options.root, idOrSlug), options.json);
+}
+
+function hookInput(): HookEventInput {
+  if (process.stdin.isTTY) {
+    throw new Error("SessionStart hook input is required");
+  }
+  const maximumBytes = 1_000_000;
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maximumBytes + 1 - total));
+      const bytes = readSync(0, chunk, 0, chunk.length, null);
+      if (bytes === 0) break;
+      total += bytes;
+      if (total > maximumBytes) {
+        throw new Error("SessionStart hook input exceeds 1 MB");
+      }
+      chunks.push(chunk.subarray(0, bytes));
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("exceeds 1 MB")) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to read SessionStart hook input: ${detail}`, {
+      cause: error,
+    });
+  }
+  const value = Buffer.concat(chunks).toString("utf8");
+  if (!value) {
+    throw new Error("SessionStart hook input is not valid JSON");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("SessionStart hook input is not valid JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("SessionStart hook input is not valid JSON");
+  }
+  return parsed;
+}
+
+async function hook(options: CliOptions): Promise<void> {
+  try {
+    const input = hookInput();
+    if (input.hook_event_name !== "SessionStart") {
+      throw new Error("Only SessionStart is supported");
+    }
+    const agent = options.agents?.[0];
+    const scope = options.scope;
+    if (!agent || options.agents?.length !== 1 || !scope) {
+      throw new Error("Hook requires one agent and an explicit scope");
+    }
+    if (options.owner !== ownershipMarker(scope, agent)) {
+      throw new Error("Hook ownership marker is missing or invalid");
+    }
+    const root = resolveHookProjectRoot(agent, scope, options.root, input);
+    const result = await sync(
+      { ...options, root, nonInteractive: true, agents: [agent], scope },
+      true,
+    );
+    output(hookSuccessOutput("SessionStart", result), true);
+  } catch (error) {
+    output(hookFailureOutput(error), true);
+  }
 }
 
 async function main(): Promise<void> {
@@ -467,20 +558,22 @@ async function main(): Promise<void> {
       await sync(cli.options);
       return;
     case "hook":
-      try {
-        await sync({ ...cli.options, nonInteractive: true }, true);
-      } catch (error) {
-        if (process.env.AGENT_SKILL_BOOTSTRAP_STRICT === "1") throw error;
-        process.stderr.write(
-          `Agent Skill Bootstrap degraded: ${(error as Error).message}\n`,
-        );
-      }
+      await hook(cli.options);
+      return;
+    case "analyze":
+      await analyze(cli.options);
+      return;
+    case "prune":
+      await prune(cli.options);
+      return;
+    case "quarantine":
+      output(listQuarantined(cli.options.root), cli.options.json);
+      return;
+    case "restore":
+      restore(cli.positionals[0], cli.options);
       return;
     case "doctor":
       doctor(cli.options);
-      return;
-    case "run":
-      await runAgent(cli.positionals[0], cli.passthrough, cli.options);
       return;
     case "uninstall":
       uninstall(cli.options);

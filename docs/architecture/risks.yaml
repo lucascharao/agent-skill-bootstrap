@@ -2,28 +2,24 @@ risks:
   - name: API authentication unavailable
     description: Local developer machines may not have a Vercel OIDC token.
     severity: high
-    mitigation: Use the official skills CLI fallback and surface provider diagnostics.
+    mitigation: Use the pinned official CLI for discovery only and generate a safe project-local fallback.
   - name: Untrusted skill installation
     description: A catalog result may contain malicious or unsafe instructions.
     severity: high
-    mitigation: Enforce audits, trusted owners, duplicate filtering, copy mode, and install caps.
+    mitigation: Require an immutable audited API snapshot; never materialize mutable CLI results.
   - name: Startup latency
     description: Network discovery on every session may delay the agent.
     severity: medium
-    mitigation: Use fingerprints, bounded timeouts, process locks, and a 24-hour cache.
+    mitigation: Use fingerprints, bounded timeouts, per-project locks, and a revalidated 24-hour cache.
   - name: Concurrent startup
     description: Multiple agents may race to install the same skill.
     severity: medium
-    mitigation: Use an atomic per-project lock and idempotent global-first inventory checks.
+    mitigation: Use an atomic per-project lock and digest-verified global-first inventory checks.
   - name: Hook disabled or untrusted
     description: A host may skip the automatic bootstrap.
     severity: high
-    mitigation: Provide trust instructions, doctor diagnostics, and an explicit sync command.
-  - name: Runtime refresh gap
-    description: A host may not expose a newly installed skill until restart.
-    severity: medium
-    mitigation: Return a restart notice and verify discovery per agent.
+    mitigation: Report trust-required explicitly, provide doctor diagnostics, and fail closed.
   - name: Configuration corruption
     description: Merging hooks may damage existing settings.
     severity: high
-    mitigation: Validate schemas, merge only owned entries, back up, and write atomically.
+    mitigation: Use exact structured ownership, backup, symlink rejection, compare-and-swap, and atomic replace.
