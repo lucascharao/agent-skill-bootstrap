@@ -11,6 +11,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { stringify } from "yaml";
+import { briefingContext } from "./briefing.js";
 import {
   loadConfig,
   projectConfigPath,
@@ -21,6 +22,12 @@ import {
 import { detectProject } from "./detection.js";
 import { hookPath, installHooks } from "./hooks.js";
 import { inventory } from "./inventory.js";
+import {
+  analyzeManagedSkills,
+  listQuarantined,
+  quarantineManagedSkills,
+  restoreQuarantined,
+} from "./maintenance.js";
 import { runtimeRoot } from "./paths.js";
 import {
   assertSupportedNode,
@@ -31,7 +38,7 @@ import {
   VERSION,
 } from "./runtime.js";
 import { syncSkills } from "./sync.js";
-import { AGENTS, type Agent, type Mode, type Scope } from "./types.js";
+import { AGENTS, type Agent, type Mode, type Scope, type SyncResult } from "./types.js";
 
 const HELP = `
 Agent Skill Bootstrap ${VERSION}
@@ -41,13 +48,17 @@ Usage:
   agent-skill-bootstrap scan [--json]
   agent-skill-bootstrap sync [--dry-run] [--force] [--json]
   agent-skill-bootstrap doctor [--json]
-  agent-skill-bootstrap run <claude|codex|grok> -- [agent arguments]
+  agent-skill-bootstrap analyze [--json]
+  agent-skill-bootstrap prune [--dry-run | --yes]
+  agent-skill-bootstrap quarantine [--json]
+  agent-skill-bootstrap restore <skill-id|slug> --yes
+  agent-skill-bootstrap run <claude|codex> -- [agent arguments]
   agent-skill-bootstrap uninstall --yes
 
 Options:
   --scope <project|global>       Installation scope
   --mode <native|strict>        Startup guarantee
-  --agents <list>               claude-code,codex,grok
+  --agents <list>               claude-code,codex
   --root <path>                 Project root (defaults to cwd)
   --non-interactive             Disable prompts
   --dry-run                     Plan without writing skills
@@ -210,26 +221,7 @@ async function interactiveOptions(
         initialValue: config.scope,
       }),
     );
-  const mode =
-    options.mode ??
-    cancelIfNeeded(
-      await p.select<Mode>({
-        message: "Choose the startup guarantee",
-        options: [
-          {
-            value: "native",
-            label: "Native hooks",
-            hint: "automatic, best effort",
-          },
-          {
-            value: "strict",
-            label: "Strict launcher",
-            hint: "sync must finish before the agent starts",
-          },
-        ],
-        initialValue: config.mode,
-      }),
-    );
+  const mode = options.mode ?? config.mode;
   const agents =
     options.agents ??
     cancelIfNeeded(
@@ -238,7 +230,6 @@ async function interactiveOptions(
         options: [
           { value: "claude-code", label: "Claude Code" },
           { value: "codex", label: "Codex" },
-          { value: "grok", label: "Grok Build" },
         ],
         initialValues: config.agents,
         required: true,
@@ -285,8 +276,9 @@ async function init(options: CliOptions): Promise<void> {
     config,
     skillsBinary: runtime.skillsBinary,
     force: true,
+    maintain: true,
   });
-  spinner?.stop("Agent Skill Bootstrap is ready");
+  spinner?.stop("Agent Skill Bootstrap is configured");
   const summary = {
     scope: selected.scope,
     mode: selected.mode,
@@ -295,16 +287,20 @@ async function init(options: CliOptions): Promise<void> {
     hookFiles,
     installed: result.installed.map((item) => item.id),
     warnings: result.warnings,
+    trustRequired: selected.agents,
     strictCommand:
       selected.mode === "strict"
-        ? `node ${JSON.stringify(runtime.cli)} run <claude|codex|grok>`
+        ? `node ${JSON.stringify(runtime.cli)} run <claude|codex>`
         : undefined,
   };
   if (options.json || options.nonInteractive) output(summary, options.json);
-  else p.outro(`Ready. Installed ${result.installed.length} agent skill binding(s).`);
+  else
+    p.outro(
+      `Configured ${result.installed.length} skill binding(s). Approve the new hooks when Claude Code or Codex asks for trust.`,
+    );
 }
 
-async function sync(options: CliOptions, hook = false): Promise<void> {
+async function sync(options: CliOptions, hook = false): Promise<SyncResult> {
   assertSupportedNode();
   const config = withOverrides(loadConfig(options.root), {
     ...(options.scope ? { scope: options.scope } : {}),
@@ -321,8 +317,10 @@ async function sync(options: CliOptions, hook = false): Promise<void> {
     dryRun: options.dryRun,
     force: options.force,
     hook,
+    maintain: hook,
   });
-  output(result, options.json);
+  if (!hook) output(result, options.json);
+  return result;
 }
 
 function scan(options: CliOptions): void {
@@ -355,8 +353,9 @@ function doctor(options: CliOptions): void {
       agent,
       path: hookPath(agent, config.scope, options.root),
       exists: existsSync(hookPath(agent, config.scope, options.root)),
-      trustRequired:
-        agent === "codex" || (agent === "grok" && config.scope === "project"),
+      trustRequired: true,
+      ready: false,
+      verification: `Open /hooks in ${agent} and approve the exact Agent Skill Bootstrap hook definition`,
     })),
     inventory: {
       global: inventory("global", options.root).length,
@@ -394,10 +393,9 @@ async function runAgent(
     claude: { agent: "claude-code", executable: "claude" },
     "claude-code": { agent: "claude-code", executable: "claude" },
     codex: { agent: "codex", executable: "codex" },
-    grok: { agent: "grok", executable: "grok" },
   };
   const target = requested ? mapping[requested] : undefined;
-  if (!target) throw new Error("run requires claude, codex, or grok");
+  if (!target) throw new Error("run requires claude or codex");
   const config = withOverrides(loadConfig(options.root), {
     mode: "strict",
     agents: [target.agent],
@@ -410,6 +408,7 @@ async function runAgent(
     config,
     skillsBinary: findSkillsBinary(),
     force: true,
+    maintain: true,
   });
   process.exitCode = await spawnAgent(target.executable, passthrough, options.root);
 }
@@ -419,18 +418,19 @@ function removeOwnedHook(path: string): boolean {
   const original = readFileSync(path, "utf8");
   const value = JSON.parse(original) as Record<string, unknown>;
   const hooks = value.hooks as Record<string, unknown> | undefined;
-  const entries = hooks && Array.isArray(hooks.SessionStart) ? hooks.SessionStart : [];
-  if (
-    !hooks ||
-    !entries.some((item) =>
-      JSON.stringify(item).includes("agent-skill-bootstrap:owned"),
-    )
-  ) {
-    return false;
+  if (!hooks) return false;
+  let changed = false;
+  for (const event of ["SessionStart", "UserPromptSubmit"]) {
+    const entries = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+    const filtered = entries.filter(
+      (item) => !JSON.stringify(item).includes("agent-skill-bootstrap:owned"),
+    );
+    if (filtered.length !== entries.length) {
+      hooks[event] = filtered;
+      changed = true;
+    }
   }
-  hooks.SessionStart = entries.filter(
-    (item) => !JSON.stringify(item).includes("agent-skill-bootstrap:owned"),
-  );
+  if (!changed) return false;
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, path);
@@ -446,6 +446,109 @@ function uninstall(options: CliOptions): void {
   const runtime = runtimeRoot(config.scope, options.root);
   if (existsSync(runtime)) rmSync(runtime, { recursive: true, force: true });
   output({ removedHooks, removedRuntime: runtime }, options.json);
+}
+
+function requiredFromResult(
+  result: SyncResult,
+  agents: Agent[],
+): Map<Agent, Set<string>> {
+  const ids = new Set([
+    ...result.selected.map((candidate) => candidate.id),
+    ...result.generated.map((candidate) => candidate.id),
+  ]);
+  return new Map(agents.map((agent) => [agent, new Set(ids)]));
+}
+
+async function analyze(options: CliOptions): Promise<void> {
+  const config = withOverrides(loadConfig(options.root), {
+    ...(options.scope ? { scope: options.scope } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  });
+  const result = await syncSkills({
+    root: options.root,
+    scope: config.scope,
+    agents: config.agents,
+    config,
+    skillsBinary: findSkillsBinary(),
+    dryRun: true,
+    force: true,
+  });
+  const analysis = analyzeManagedSkills(
+    options.root,
+    requiredFromResult(result, config.agents),
+  );
+  output({ briefing: result.briefing, ...analysis }, options.json);
+}
+
+async function prune(options: CliOptions): Promise<void> {
+  if (!options.dryRun && !options.yes) {
+    throw new Error("prune requires --yes; use --dry-run to preview");
+  }
+  const config = withOverrides(loadConfig(options.root), {
+    ...(options.scope ? { scope: options.scope } : {}),
+    ...(options.agents ? { agents: options.agents } : {}),
+  });
+  const result = await syncSkills({
+    root: options.root,
+    scope: config.scope,
+    agents: config.agents,
+    config,
+    skillsBinary: findSkillsBinary(),
+    dryRun: true,
+    force: true,
+  });
+  const maintenance = quarantineManagedSkills(
+    options.root,
+    requiredFromResult(result, config.agents),
+    { dryRun: options.dryRun },
+  );
+  output(maintenance, options.json);
+}
+
+function restore(idOrSlug: string | undefined, options: CliOptions): void {
+  if (!idOrSlug) throw new Error("restore requires a skill id or slug");
+  if (!options.yes) throw new Error("restore requires --yes");
+  output(restoreQuarantined(options.root, idOrSlug), options.json);
+}
+
+function hookInput(): { hook_event_name?: string } {
+  if (process.stdin.isTTY) return {};
+  try {
+    const value = readFileSync(0, "utf8");
+    return value ? (JSON.parse(value) as { hook_event_name?: string }) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function hook(options: CliOptions): Promise<void> {
+  const event = hookInput().hook_event_name ?? "SessionStart";
+  try {
+    const result = await sync({ ...options, nonInteractive: true }, true);
+    const context = briefingContext(result.briefing, [
+      ...result.selected.map((candidate) => candidate.id),
+      ...result.generated.map((candidate) => candidate.id),
+    ]);
+    output(
+      {
+        continue: true,
+        systemMessage: "Agent Skill Bootstrap completed the project skill check.",
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: context,
+        },
+      },
+      true,
+    );
+  } catch (error) {
+    output(
+      {
+        continue: false,
+        stopReason: `Agent Skill Bootstrap could not prepare this project: ${(error as Error).message}`,
+      },
+      true,
+    );
+  }
 }
 
 async function main(): Promise<void> {
@@ -467,14 +570,19 @@ async function main(): Promise<void> {
       await sync(cli.options);
       return;
     case "hook":
-      try {
-        await sync({ ...cli.options, nonInteractive: true }, true);
-      } catch (error) {
-        if (process.env.AGENT_SKILL_BOOTSTRAP_STRICT === "1") throw error;
-        process.stderr.write(
-          `Agent Skill Bootstrap degraded: ${(error as Error).message}\n`,
-        );
-      }
+      await hook(cli.options);
+      return;
+    case "analyze":
+      await analyze(cli.options);
+      return;
+    case "prune":
+      await prune(cli.options);
+      return;
+    case "quarantine":
+      output(listQuarantined(cli.options.root), cli.options.json);
+      return;
+    case "restore":
+      restore(cli.positionals[0], cli.options);
       return;
     case "doctor":
       doctor(cli.options);

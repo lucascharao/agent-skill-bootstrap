@@ -46,11 +46,41 @@ describe("hook installation", () => {
       fixture.home,
     );
     const value = JSON.parse(readFileSync(path, "utf8")) as {
-      hooks: { SessionStart: unknown[] };
+      hooks: { SessionStart: unknown[]; UserPromptSubmit: unknown[] };
     };
 
     expect(value.hooks.SessionStart).toHaveLength(2);
+    expect(value.hooks.UserPromptSubmit).toHaveLength(1);
     expect(JSON.stringify(value)).toContain("existing");
     expect(JSON.stringify(value)).toContain("agent-skill-bootstrap:owned");
+  });
+
+  it("installs both lifecycle events at user scope without touching project config", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const runtime: RuntimeInstall = {
+      root: "/runtime",
+      cli: "/runtime/cli.js",
+      skillsBinary: "/runtime/skills.mjs",
+    };
+
+    const changed = installHooks(
+      ["claude-code", "codex"],
+      "global",
+      fixture.root,
+      runtime,
+      parseConfig({ scope: "global" }),
+      fixture.home,
+    );
+
+    expect(changed).toHaveLength(2);
+    for (const agent of ["claude-code", "codex"] as const) {
+      const path = hookPath(agent, "global", fixture.root, fixture.home);
+      const value = JSON.parse(readFileSync(path, "utf8")) as {
+        hooks: { SessionStart: unknown[]; UserPromptSubmit: unknown[] };
+      };
+      expect(value.hooks.SessionStart).toHaveLength(1);
+      expect(value.hooks.UserPromptSubmit).toHaveLength(1);
+    }
   });
 });

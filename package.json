@@ -1,7 +1,7 @@
 {
   "name": "agent-skill-bootstrap",
   "version": "0.1.0",
-  "description": "Detect a project and install only the agent skills it needs before Claude Code, Codex, or Grok starts.",
+  "description": "Automatically prepare the project briefing and required skills before Claude Code or Codex starts development.",
   "type": "module",
   "bin": {
     "agent-skill-bootstrap": "dist/cli.js",
@@ -34,7 +34,6 @@
     "skills.sh",
     "claude-code",
     "codex",
-    "grok",
     "ai-agents",
     "developer-tools",
     "cli"

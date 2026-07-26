@@ -13,6 +13,7 @@ import type { Scope } from "./types.js";
 interface ProjectState {
   fingerprint: string;
   syncedAt: string;
+  skillIds: string[];
 }
 
 interface State {
@@ -50,13 +51,23 @@ export function markSynced(
   scope: Scope,
   root: string,
   fingerprint: string,
+  skillIds: string[] = [],
   home?: string,
 ): void {
   const path = statePath(scope, root, home);
   const value = read(path);
-  value.projects[key(root)] = { fingerprint, syncedAt: new Date().toISOString() };
+  value.projects[key(root)] = {
+    fingerprint,
+    syncedAt: new Date().toISOString(),
+    skillIds: [...new Set(skillIds)].sort(),
+  };
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, path);
+}
+
+export function cachedSkillIds(scope: Scope, root: string, home?: string): string[] {
+  const entry = read(statePath(scope, root, home)).projects[key(root)];
+  return Array.isArray(entry?.skillIds) ? entry.skillIds : [];
 }

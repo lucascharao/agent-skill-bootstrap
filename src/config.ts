@@ -10,9 +10,9 @@ const ConfigSchema = z.object({
   scope: z.enum(["global", "project"]).default("project"),
   mode: z.enum(["native", "strict"]).default("native"),
   agents: z
-    .array(z.enum(["claude-code", "codex", "grok"]))
+    .array(z.enum(["claude-code", "codex"]))
     .min(1)
-    .default(["claude-code", "codex", "grok"]),
+    .default(["claude-code", "codex"]),
   discovery: z
     .object({
       provider: z.enum(["auto", "api", "cli"]).default("auto"),
@@ -62,6 +62,13 @@ const ConfigSchema = z.object({
     .default({
       cache_ttl_hours: 24,
       hook_timeout_seconds: 30,
+    }),
+  maintenance: z
+    .object({
+      automatic_quarantine: z.boolean().default(true),
+    })
+    .default({
+      automatic_quarantine: true,
     }),
 });
 

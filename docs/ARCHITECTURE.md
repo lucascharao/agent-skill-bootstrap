@@ -2,24 +2,24 @@
 
 Status: Approved
 
-Version: 1.0
+Version: 1.1
 
-Date: 2026-07-25
+Date: 2026-07-26
 
 ## Overview
 
 This document defines the architecture, interfaces, security boundaries, and
 delivery constraints for the first production-ready release of Agent Skill
-Bootstrap. It is the implementation contract for the CLI and its three agent
-adapters.
+Bootstrap. It is the implementation contract for the CLI and its two supported
+agent adapters.
 
 ## Purpose
 
 Agent Skill Bootstrap is a local-first Node.js CLI distributed through `npx`.
 It detects a project's technology stack, discovers relevant skills in the
 skills.sh ecosystem, skips skills already installed globally or locally, and
-installs only the missing skills before Claude Code, Codex, or Grok Build starts
-development work.
+prepares a deterministic briefing plus missing skills before Claude Code or
+Codex starts development work.
 
 ## Scope
 
@@ -31,12 +31,16 @@ In scope:
 - Fallback discovery through the official `skills` CLI.
 - Security filtering, audit-aware selection, and trusted-owner policy.
 - Global-before-local deduplication.
-- Claude Code, Codex, and Grok Build lifecycle adapters.
+- Claude Code and Codex lifecycle adapters.
+- Deterministic project briefing and context handoff.
+- Safe project-local skill generation when the catalog has no qualifying entry.
+- Automatic recoverable quarantine for obsolete package-owned skills.
 - Cache, lock, dry-run, doctor, uninstall, and machine-readable output.
 
 Out of scope:
 
-- Installing or configuring Claude Code, Codex, or Grok Build themselves.
+- Installing or configuring Claude Code or Codex themselves.
+- Grok Build until its official hooks can prove first-response context loading.
 - Silently bypassing hook trust or agent sandbox policies.
 - Editing system-managed enterprise policies.
 - Acting as a hosted proxy for skills.sh authentication.
@@ -49,9 +53,8 @@ Out of scope:
 - A repeated sync is idempotent and performs no duplicate installation.
 - A project sync skips a matching global skill.
 - Hooks preserve existing user or repository configuration.
-- In native hook mode, offline or unavailable discovery never blocks an agent
-  session. Strict mode fails closed and does not spawn the agent when policy
-  requires a fresh discovery or audit result.
+- Preparation errors stop the hook flow instead of reporting a false ready
+  state. Strict launcher mode does not spawn the agent when preparation fails.
 - Untrusted or failed-audit skills are not automatically installed by default.
 - Linux, macOS, and Windows behavior is covered by tests where paths differ.
 
@@ -64,15 +67,17 @@ The official `skills` CLI already supports:
 
 - Search with `npx skills find`.
 - Project and global installation.
-- Claude Code, Codex, and Grok Build targets.
+- Claude Code and Codex targets.
 - JSON inventory output.
 
 Agent lifecycle support differs:
 
-- Claude Code supports `SessionStart` in settings and can inject hook output.
-- Codex supports `SessionStart` in `hooks.json`; non-managed hooks require trust.
-- Grok Build supports personal and project hooks; project hooks require trust.
-  Passive hook output is ignored, so the hook must do all work itself.
+- Claude Code supports `SessionStart`, `UserPromptSubmit`, context injection,
+  and live skill reload.
+- Codex supports `SessionStart`, `UserPromptSubmit`, and automatic skill-change
+  detection; non-managed hooks require trust.
+- Grok Build is excluded because its passive startup and prompt hooks ignore
+  stdout and cannot prove that new context is loaded before the first response.
 
 No design can guarantee execution in every IDE, cloud session, or managed
 environment when the host disables hooks or denies network access. The CLI must
@@ -82,7 +87,7 @@ state that boundary instead of bypassing it.
 
 ### Option A: Command wrappers
 
-Install wrapper binaries for `claude`, `codex`, and `grok` that sync skills and
+Install wrapper binaries for `claude` and `codex` that sync skills and
 then execute the real agent.
 
 Pros:
@@ -98,7 +103,7 @@ Cons:
 
 ### Option B: Native hooks only
 
-Write only each agent's supported `SessionStart` hook.
+Write only each agent's supported startup hooks.
 
 Pros:
 
@@ -108,7 +113,7 @@ Pros:
 
 Cons:
 
-- Requires explicit trust in Codex and project-scoped Grok.
+- Requires explicit host trust.
 - Hook discovery and skill refresh timing differ by host.
 - Managed environments may disable hooks.
 
@@ -116,7 +121,7 @@ Cons:
 
 Install native hooks, expose explicit `sync`, `scan`, and `doctor` commands, and
 persist a fast cache and lock. Hooks use the same sync engine in non-interactive
-fail-open mode.
+fail-closed mode.
 
 Pros:
 
@@ -128,24 +133,24 @@ Pros:
 Cons:
 
 - Cannot bypass required trust.
-- The first Grok session may require restart if its runtime does not refresh
-  newly installed skills dynamically.
+- Managed environments can disable hooks entirely.
 - More adapter code than either single-strategy option.
 
 Decision: Option C.
 
 Two execution guarantees are exposed:
 
-- Native mode: best-effort automatic startup through vendor hooks. It is the
-  default and never bypasses host trust or policy.
+- Native mode: automatic startup through vendor hooks. It is the default,
+  never bypasses host trust or policy, and does not report readiness when
+  preparation fails.
 - Strict mode: deterministic `agent-skill-bootstrap run <agent>`, which
   completes sync before spawning the vendor process. It does not shadow the
   vendor executable and is the supported choice when “before start” must be a
   hard guarantee.
 
-The interactive installer runs an initial sync before reporting success in
-both modes. A new project reached only through a global native hook may need one
-agent restart when the host does not refresh skills dynamically.
+The interactive installer runs an initial sync before reporting configuration
+success in both modes. It reports trust as a required host action rather than
+claiming the host is already ready.
 
 ## Architecture
 
@@ -156,13 +161,14 @@ flowchart TD
     A[User or SessionStart hook] --> B[CLI boundary]
     B --> C[Project detector]
     B --> D[Config, cache, and lock]
-    C --> E[Discovery provider]
+    C --> P[Deterministic briefing]
+    P --> E[Discovery provider]
     D --> E
     E --> F[Policy engine]
-    F --> G[Official skills CLI adapter]
-    G --> H[Claude Code]
-    G --> I[Codex]
-    G --> J[Grok Build]
+    F --> G[Catalog snapshot or local generator]
+    G --> M[Owned-skill maintenance]
+    M --> H[Claude Code]
+    M --> I[Codex]
 ```
 
 ## Primary Data Flow
@@ -171,7 +177,7 @@ flowchart TD
    environment variables, and CLI flags.
 2. Resolve the project root without walking above the requested boundary.
 3. Acquire a per-project lock. If another sync is running, return immediately.
-4. Fingerprint relevant manifests. Use cached recommendations when unchanged
+4. Build and fingerprint a briefing from relevant manifests. Use cached recommendations when unchanged
    and within TTL.
 5. Detect technologies and produce bounded search queries.
 6. Read global inventory first, then project inventory, including agent
@@ -180,10 +186,10 @@ flowchart TD
 8. Normalize candidates to stable `{source}/{skill}` identifiers.
 9. Score relevance and apply duplicate, security, owner, audit, confidence, and
    result-limit policies.
-10. Materialize an immutable snapshot or pinned repository revision, then
-    install only the missing skill-to-agent bindings.
-11. Persist state atomically and return a concise context message that
-    distinguishes installed, available, restart-required, and failed states.
+10. Materialize an immutable snapshot or generate an instruction-only
+    project-local fallback, then install only missing bindings.
+11. Reevaluate package-owned project skills and quarantine obsolete bindings.
+12. Persist state atomically and return a concise briefing and skill context.
 
 ## Components
 
@@ -266,6 +272,46 @@ Monorepos aggregate signals by workspace and retain the evidence path. Ambiguous
 signals remain separate rather than collapsing to one framework. Unknown
 projects produce no automatic installation.
 
+### Project briefing
+
+The briefing is a deterministic projection of bounded detection inputs:
+
+- Project name, CLI/application/library/general classification, and workspaces
+  from `package.json`.
+- Technology names, confidence, manifest evidence, and discovery queries from
+  the detector.
+- A SHA-256 fingerprint over the stable briefing fields.
+
+The briefing never reads `.env`, credentials, prompt history, Git history, or
+arbitrary source files. Project-scope briefings live under
+`.agent-skill-bootstrap/briefing.json`. User-scope briefings live in an
+isolated per-project directory under the user's package configuration root.
+
+### Local skill generator
+
+For each supported detection signal without an admitted catalog candidate, the
+generator creates one project-local instruction-only skill. The `SKILL.md`
+contains only required `name` and `description` frontmatter, verified evidence,
+a bounded workflow, validation expectations, and safety boundaries.
+
+The same briefing and signal produce identical contents. Generated skills
+contain no scripts or executable assets, are never promoted to user scope, and
+use stable IDs under `agent-skill-bootstrap/generated/*`.
+
+### Owned-skill maintenance
+
+Only directories containing a valid `.agent-skill-bootstrap.json` ownership
+manifest are eligible for maintenance. When a project fingerprint changes, the
+sync engine computes desired IDs per agent and compares them with project
+inventory.
+
+Obsolete owned directories are atomically moved to
+`.agent-skill-bootstrap/quarantine/<agent>/<slug>`. Quarantine metadata records
+the stable ID, original path, reason, and timestamp. Automatic operation never
+permanently deletes content. Invalid manifests, symlinks, external locks, and
+unmanaged directories are reported but never moved. Restore requires explicit
+consent and refuses an occupied destination.
+
 ### Discovery provider
 
 Input:
@@ -299,7 +345,7 @@ Reads the runtime-local skills CLI `list --json` separately at project and
 global scope.
 Malformed entries are ignored with a warning. Deduplication is performed by
 `stable skill identity + target agent`. A global Claude-only installation
-therefore skips Claude but still permits the missing Codex and Grok bindings.
+therefore skips Claude but still permits the missing Codex binding.
 
 A legacy name-only match never authorizes a skip. When source, stable ID, and
 hash are unavailable, the item is reported as an ambiguous collision and
@@ -420,7 +466,7 @@ Hooks do not call `npx`, require npm registry access, or silently upgrade.
 `update` installs a new version side-by-side, rewrites only owned hook entries,
 verifies them, and then removes an unused old runtime.
 
-The `run <claude|codex|grok> -- [args...]` command locates the vendor executable
+The `run <claude|codex> -- [args...]` command locates the vendor executable
 without a shell, rejects recursion to its own binary, completes sync, and only
 then spawns the agent. Generated commands are tested on macOS, Linux, and
 Windows path fixtures.
@@ -432,7 +478,6 @@ the checkout path:
 - Codex first uses `git rev-parse --show-toplevel` from the hook `cwd`. For a
   non-Git project, it falls back to the normalized, existing hook `cwd` after
   confirming that it remains inside the configured project boundary.
-- Grok uses `GROK_WORKSPACE_ROOT`.
 - Windows uses `commandWindows` with equivalent environment/root resolution.
 
 User launchers use the platform config directory. `doctor` validates PATH,
@@ -539,8 +584,6 @@ API construction and limits:
 - Claude Code: user `~/.claude/settings.json` or project
   `.claude/settings.json`.
 - Codex: user `~/.codex/hooks.json` or project `.codex/hooks.json`.
-- Grok Build: user `~/.grok/hooks/*.json` or project
-  `.grok/hooks/*.json`.
 
 The installer surfaces required trust actions but never attempts to approve
 them on behalf of the user.
@@ -563,13 +606,13 @@ All owned hook entries carry the marker
 
 - User path: `~/.claude/settings.json`.
 - Project path: `.claude/settings.json`.
-- Event: `SessionStart`.
+- Events: `SessionStart` and `UserPromptSubmit`.
 - Matcher: `startup|resume|clear|compact`.
 - Handler: command, environment-resolved Node, and runtime-local CLI path.
 - Root input: hook JSON `cwd` and `CLAUDE_PROJECT_DIR`.
 - Timeout: 30 seconds by default.
-- Output: zero with JSON `additionalContext` for success or restart-required;
-  non-zero SessionStart failure remains non-blocking.
+- Output: JSON `additionalContext` containing the deterministic briefing and
+  required skill IDs. Preparation failure returns `continue: false`.
 
 ```json
 {
@@ -590,7 +633,7 @@ All owned hook entries carry the marker
 
 - User path: `~/.codex/hooks.json`.
 - Project path: `.codex/hooks.json`.
-- Event: `SessionStart`.
+- Events: `SessionStart` and `UserPromptSubmit`.
 - Matcher: `startup|resume|clear|compact`, based on Codex's own documented
   `SessionStart` start-source contract. The adapter owns this matcher
   independently and does not infer parity from Claude configuration.
@@ -600,27 +643,16 @@ All owned hook entries carry the marker
 - Hooks feature must be enabled and a non-managed hook must be reviewed and
   trusted in `/hooks`; the CLI never changes trust state.
 
-### Grok Build
-
-- User path: `~/.grok/hooks/agent-skill-bootstrap.json`.
-- Project path: `.grok/hooks/agent-skill-bootstrap.json`.
-- Event: `SessionStart`; passive stdout is not treated as agent context.
-- Input: Grok camelCase JSON plus `GROK_WORKSPACE_ROOT`, normalized internally.
-- Timeout: 30 seconds by default.
-- Project hooks require `/hooks-trust` or explicit host `--trust`; the CLI never
-  changes `trusted_folders.toml`.
-
 ### First-session visibility
 
-| Host        | Native hook order                         | Newly installed skill visible immediately   | Native contract           |
-| ----------- | ----------------------------------------- | ------------------------------------------- | ------------------------- |
-| Claude Code | Session already created                   | Not assumed                                 | Restart may be required   |
-| Codex       | Session configured before hook            | Dynamic detection exists, but not relied on | Verify or request restart |
-| Grok Build  | Extensions discovered before passive hook | Not assumed                                 | Restart may be required   |
+| Host        | Context contract                                 | Skill refresh contract       |
+| ----------- | ------------------------------------------------ | ---------------------------- |
+| Claude Code | Hook stdout/additional context reaches the model | Live skill reload documented |
+| Codex       | Session and prompt hooks run before agent work   | Automatic change detection   |
 
-Native mode never reports `loaded` without a host verification signal; it
-reports `installed_restart_required` otherwise. Strict mode completes sync
-before the agent process exists and is the only hard first-session guarantee.
+The CLI never reports a host as ready merely because files exist. Trust and
+hook enablement must be verified in the host. Strict mode completes sync before
+the agent process exists when native hooks are unavailable.
 
 ## Configuration
 
@@ -633,7 +665,6 @@ scope: project
 agents:
   - claude-code
   - codex
-  - grok
 discovery:
   api_base_url: https://skills.sh
   provider: auto
@@ -654,7 +685,8 @@ security:
 installation:
   max_skills_per_sync: 5
   copy: true
-  fail_open_on_hook: true
+maintenance:
+  automatic_quarantine: true
 detector:
   max_depth: 4
   ignored_directories:
@@ -733,7 +765,7 @@ and a name-only legacy collision is never included in `existing`.
 ## Error Handling
 
 - Interactive commands fail closed with an actionable message.
-- Session hooks fail open by default and emit a warning.
+- Session and prompt hooks return a stopped preparation state on failure.
 - HTTP 401 switches to the CLI fallback when provider is `auto`.
 - HTTP 429 respects `Retry-After` once, then uses cache or fallback.
 - HTTP 503 retries with bounded exponential backoff.
@@ -741,8 +773,8 @@ and a name-only legacy collision is never included in `existing`.
 - Partial installs are recorded individually; state is written atomically.
 - Stale locks are recovered only after validating owner PID and age.
 - Strict mode waits for an existing lock owner to finish, validates its result,
-  and times out closed before spawning the agent. Native mode waits only within
-  its hook budget, then returns an explicit `sync_in_progress` fail-open state.
+  and times out closed before spawning the agent. Native hooks return a stopped
+  preparation state when the lock budget expires.
 - Hook success never claims that a skill is loaded when the host reports a
   restart-required state.
 

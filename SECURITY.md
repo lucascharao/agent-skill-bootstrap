@@ -34,12 +34,17 @@ user-level security floor. Automatic API content is accepted only from exact
 user-allowlisted HTTPS origins. Files are staged and validated before an atomic
 directory rename.
 
-Native hook mode is fail-open to protect agent availability. Strict launcher
-mode is fail-closed to protect execution ordering. This distinction is
-intentional.
+Native hooks and strict launcher mode fail closed when project preparation
+cannot complete. The package does not report a host as ready when its hook is
+missing, disabled, untrusted, or unverifiable.
+
+Automatic maintenance is limited to project skill directories containing a
+valid Agent Skill Bootstrap ownership manifest. Obsolete owned skills are moved
+to recoverable quarantine. The automatic flow never permanently deletes skills
+and never moves unmanaged directories or symlinks.
 
 ## Out of scope
 
-The project does not secure the Claude Code, Codex, Grok Build, Git, Node.js, or
-npm installations themselves. It also cannot override enterprise policies or a
-host that disables hooks.
+The project does not secure the Claude Code, Codex, Git, Node.js, or npm
+installations themselves. It also cannot override enterprise policies or a host
+that disables hooks.

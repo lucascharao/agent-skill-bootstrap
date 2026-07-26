@@ -62,14 +62,15 @@ function safeJsonWrite(
   renameSync(temporary, path);
 }
 
-function sessionStartEntry(
+function hookEntry(
   runtime: RuntimeInstall,
   agent: Agent,
   scope: Scope,
   config: BootstrapConfig,
+  event: "SessionStart" | "UserPromptSubmit",
 ): Record<string, unknown> {
   return {
-    matcher: "startup|resume|clear|compact",
+    ...(event === "SessionStart" ? { matcher: "startup|resume|clear|compact" } : {}),
     hooks: [
       {
         type: "command",
@@ -81,18 +82,19 @@ function sessionStartEntry(
   };
 }
 
-function addOwnedSessionStart(
+function addOwnedHook(
   value: Record<string, unknown>,
+  event: "SessionStart" | "UserPromptSubmit",
   entry: Record<string, unknown>,
 ): void {
   const hooks =
     value.hooks && typeof value.hooks === "object"
       ? (value.hooks as Record<string, unknown>)
       : {};
-  const current: unknown[] = Array.isArray(hooks.SessionStart)
-    ? (hooks.SessionStart as unknown[])
+  const current: unknown[] = Array.isArray(hooks[event])
+    ? (hooks[event] as unknown[])
     : [];
-  hooks.SessionStart = [
+  hooks[event] = [
     ...current.filter((item) => !JSON.stringify(item).includes(MARKER)),
     entry,
   ];
@@ -111,8 +113,6 @@ export function hookPath(
       return join(base, ".claude", "settings.json");
     case "codex":
       return join(base, ".codex", "hooks.json");
-    case "grok":
-      return join(base, ".grok", "hooks", "agent-skill-bootstrap.json");
   }
 }
 
@@ -128,7 +128,16 @@ export function installHooks(
   for (const agent of agents) {
     const path = hookPath(agent, scope, projectRoot, home);
     safeJsonWrite(path, (value) => {
-      addOwnedSessionStart(value, sessionStartEntry(runtime, agent, scope, config));
+      addOwnedHook(
+        value,
+        "SessionStart",
+        hookEntry(runtime, agent, scope, config, "SessionStart"),
+      );
+      addOwnedHook(
+        value,
+        "UserPromptSubmit",
+        hookEntry(runtime, agent, scope, config, "UserPromptSubmit"),
+      );
     });
     changed.push(relative(projectRoot, path));
   }

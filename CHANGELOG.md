@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-07-25
+## [0.1.0] - 2026-07-26
 
 ### Added
 
@@ -16,10 +16,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Authenticated skills.sh API adapter
 - Pinned official skills CLI fallback
 - Global-first per-agent deduplication
-- Claude Code, Codex, and Grok Build lifecycle hooks
-- Native fail-open and strict fail-closed startup modes
+- Claude Code and Codex `SessionStart` plus `UserPromptSubmit` lifecycle hooks
+- Deterministic project briefing and context handoff
+- Safe project-local skill generation when no catalog candidate qualifies
+- Automatic, recoverable quarantine and explicit restore workflow
+- Native automatic and strict launcher startup modes
 - Persistent runtime, cache, lock, doctor, dry-run, and JSON output
 - Security-focused snapshot validation and atomic materialization
+
+### Changed
+
+- Grok Build was removed from the initial release because its passive startup
+  hooks cannot prove that newly generated context is loaded before the first
+  model response.
 
 [Unreleased]: https://github.com/lucascharao/agent-skill-bootstrap/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/lucascharao/agent-skill-bootstrap/releases/tag/v0.1.0

@@ -1,17 +1,22 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createBriefing, persistBriefing } from "./briefing.js";
 import type { BootstrapConfig } from "./config.js";
 import { detectProject } from "./detection.js";
 import { DiscoveryError, SkillsApi, SkillsCli } from "./discovery.js";
+import { generateSkillSnapshot } from "./generate.js";
 import { installDirectory, installSnapshot } from "./install.js";
 import { alreadyInstalled } from "./inventory.js";
 import { withLock } from "./lock.js";
+import { quarantineManagedSkills } from "./maintenance.js";
 import { statePath } from "./paths.js";
 import { auditAllowed, fallbackAllowed, scoreCandidate } from "./policy.js";
-import { cacheFresh, markSynced } from "./state.js";
+import { cacheFresh, cachedSkillIds, markSynced } from "./state.js";
 import type {
   Agent,
+  DetectionSignal,
+  ProjectBriefing,
   Scope,
   SkillCandidate,
   SkillSnapshot,
@@ -26,6 +31,7 @@ interface SyncOptions {
   dryRun?: boolean;
   force?: boolean;
   hook?: boolean;
+  maintain?: boolean;
   home?: string;
   skillsBinary: string;
   api?: SkillsApi;
@@ -35,12 +41,13 @@ interface SyncOptions {
 interface Selected {
   candidate: SkillCandidate;
   provider: "api" | "cli";
+  signal: DetectionSignal;
   snapshot?: SkillSnapshot;
 }
 
 function choose(
   candidates: SkillCandidate[],
-  signal: ReturnType<typeof detectProject>["signals"][number],
+  signal: DetectionSignal,
   config: BootstrapConfig,
 ): SkillCandidate | null {
   return (
@@ -58,11 +65,16 @@ function choose(
   );
 }
 
-async function discover(options: SyncOptions): Promise<{
+async function discover(
+  options: SyncOptions,
+  signals: DetectionSignal[],
+): Promise<{
   selected: Selected[];
+  unresolved: DetectionSignal[];
   warnings: string[];
 }> {
   const warnings: string[] = [];
+  const unresolved: DetectionSignal[] = [];
   const api = options.api ?? new SkillsApi(options.config);
   const cli = options.cli ?? new SkillsCli(options.skillsBinary, options.root);
   const token = process.env[options.config.discovery.token_env];
@@ -71,9 +83,9 @@ async function discover(options: SyncOptions): Promise<{
     (options.config.discovery.provider === "auto" && !token)
       ? "cli"
       : "api";
-  const selected = new Map<string, Selected>();
+  const selected: Selected[] = [];
 
-  for (const signal of detectProject(options.root).signals) {
+  for (const signal of signals) {
     if (signal.technology === "General software project") {
       warnings.push(
         "No supported project stack was detected; automatic install skipped",
@@ -95,16 +107,13 @@ async function discover(options: SyncOptions): Promise<{
     }
     if (provider === "cli") candidates = await cli.search(signal.query);
     const candidate = choose(candidates, signal, options.config);
-    if (candidate && !selected.has(candidate.id)) {
-      selected.set(candidate.id, { candidate, provider });
-    }
+    if (candidate) selected.push({ candidate, provider, signal });
+    else unresolved.push(signal);
   }
 
   return {
-    selected: [...selected.values()].slice(
-      0,
-      options.config.security.max_automatic_installs,
-    ),
+    selected: selected.slice(0, options.config.security.max_automatic_installs),
+    unresolved,
     warnings,
   };
 }
@@ -113,9 +122,10 @@ async function enrichAndFilter(
   entries: Selected[],
   options: SyncOptions,
   warnings: string[],
-): Promise<Selected[]> {
+): Promise<{ accepted: Selected[]; rejected: DetectionSignal[] }> {
   const api = options.api ?? new SkillsApi(options.config);
   const accepted: Selected[] = [];
+  const rejected: DetectionSignal[] = [];
   for (const entry of entries) {
     if (entry.provider === "cli") {
       if (options.config.mode === "strict") {
@@ -125,6 +135,7 @@ async function enrichAndFilter(
       }
       if (!fallbackAllowed(entry.candidate, options.config)) {
         warnings.push(`Skipped untrusted fallback source ${entry.candidate.source}`);
+        rejected.push(entry.signal);
         continue;
       }
       accepted.push(entry);
@@ -133,122 +144,242 @@ async function enrichAndFilter(
     const audits = await api.audits(entry.candidate.id);
     if (!auditAllowed(audits, options.config)) {
       warnings.push(`Skipped ${entry.candidate.id}: audit policy rejected it`);
+      rejected.push(entry.signal);
       continue;
     }
     const snapshot = await api.snapshot(entry.candidate.id);
     if (!snapshot.files) {
       warnings.push(`Skipped ${entry.candidate.id}: API snapshot is unavailable`);
+      rejected.push(entry.signal);
       continue;
     }
     accepted.push({ ...entry, snapshot });
   }
-  return accepted;
+  return { accepted, rejected };
+}
+
+function requiredMap(
+  agents: Agent[],
+  entries: Selected[],
+  generated: Array<ReturnType<typeof generateSkillSnapshot>>,
+): Map<Agent, Set<string>> {
+  const required = new Map<Agent, Set<string>>();
+  for (const agent of agents) {
+    required.set(
+      agent,
+      new Set([
+        ...entries.map((entry) => entry.candidate.id),
+        ...generated.map((entry) => entry.candidate.id),
+      ]),
+    );
+  }
+  return required;
+}
+
+function skippedResult(
+  detection: ReturnType<typeof detectProject>,
+  briefing: ProjectBriefing,
+  skillIds: string[],
+): SyncResult {
+  return {
+    status: "skipped",
+    detection,
+    briefing,
+    selected: skillIds.map((id) => ({
+      id,
+      slug: id.split("/").at(-1) ?? id,
+      name: id,
+      source: id.split("/").slice(0, -1).join("/"),
+      installUrl: null,
+      query: "",
+    })),
+    generated: [],
+    installed: [],
+    quarantined: [],
+    skipped: [],
+    warnings: [],
+  };
+}
+
+async function installCatalogEntry(
+  entry: Selected,
+  options: SyncOptions,
+  installed: SyncResult["installed"],
+  skipped: SyncResult["skipped"],
+  cli: SkillsCli,
+): Promise<void> {
+  const missingAgents = options.agents.filter((agent) => {
+    const existing = alreadyInstalled(
+      entry.candidate.id,
+      agent,
+      options.scope,
+      options.root,
+      options.home,
+    );
+    if (existing) {
+      skipped.push({
+        candidate: entry.candidate,
+        reason: `already installed for ${agent} in ${existing.scope} scope`,
+      });
+      return false;
+    }
+    return true;
+  });
+  if (missingAgents.length === 0 || options.dryRun) return;
+
+  if (entry.snapshot) {
+    for (const agent of missingAgents) {
+      installed.push(
+        installSnapshot(
+          entry.snapshot,
+          entry.candidate,
+          agent,
+          options.scope,
+          options.root,
+          options.home,
+        ),
+      );
+    }
+    return;
+  }
+
+  const temporary = mkdtempSync(join(tmpdir(), "agent-skill-bootstrap-"));
+  try {
+    const sourcePath = await cli.materialize(
+      entry.candidate.source,
+      entry.candidate.slug,
+      temporary,
+    );
+    if (!existsSync(sourcePath)) {
+      throw new Error(`Official CLI did not produce ${entry.candidate.id}`);
+    }
+    for (const agent of missingAgents) {
+      installed.push(
+        installDirectory(
+          sourcePath,
+          entry.candidate,
+          agent,
+          options.scope,
+          options.root,
+          options.home,
+        ),
+      );
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+function installGeneratedEntry(
+  entry: ReturnType<typeof generateSkillSnapshot>,
+  options: SyncOptions,
+  installed: SyncResult["installed"],
+  skipped: SyncResult["skipped"],
+): void {
+  for (const agent of options.agents) {
+    const existing = alreadyInstalled(
+      entry.candidate.id,
+      agent,
+      "project",
+      options.root,
+      options.home,
+    );
+    if (existing) {
+      skipped.push({
+        candidate: entry.candidate,
+        reason: `generated fallback already installed for ${agent}`,
+      });
+      continue;
+    }
+    if (options.dryRun) continue;
+    installed.push(
+      installSnapshot(
+        entry.snapshot,
+        entry.candidate,
+        agent,
+        "project",
+        options.root,
+        options.home,
+      ),
+    );
+  }
 }
 
 async function executeSync(options: SyncOptions): Promise<SyncResult> {
   const detection = detectProject(options.root);
+  const briefing = createBriefing(options.root, detection);
   if (
     options.hook &&
     !options.force &&
     cacheFresh(
       options.scope,
       options.root,
-      detection.fingerprint,
+      briefing.fingerprint,
       options.config.runtime.cache_ttl_hours,
       options.home,
     )
   ) {
-    return {
-      status: "skipped",
+    return skippedResult(
       detection,
-      selected: [],
-      installed: [],
-      skipped: [],
-      warnings: [],
-    };
+      briefing,
+      cachedSkillIds(options.scope, options.root, options.home),
+    );
   }
 
-  const discovery = await discover(options);
-  const entries = await enrichAndFilter(
+  const discovery = await discover(options, detection.signals);
+  const enrichment = await enrichAndFilter(
     discovery.selected,
     options,
     discovery.warnings,
+  );
+  const fallbackSignals = [...discovery.unresolved, ...enrichment.rejected].slice(
+    0,
+    options.config.security.max_automatic_installs,
+  );
+  const generated = fallbackSignals.map((signal) =>
+    generateSkillSnapshot(signal, briefing),
   );
   const installed: SyncResult["installed"] = [];
   const skipped: SyncResult["skipped"] = [];
   const cli = options.cli ?? new SkillsCli(options.skillsBinary, options.root);
 
-  for (const entry of entries) {
-    const missingAgents = options.agents.filter((agent) => {
-      const existing = alreadyInstalled(
-        entry.candidate.id,
-        agent,
-        options.scope,
-        options.root,
-        options.home,
-      );
-      if (existing) {
-        skipped.push({
-          candidate: entry.candidate,
-          reason: `already installed for ${agent} in ${existing.scope} scope`,
-        });
-        return false;
-      }
-      return true;
-    });
-    if (missingAgents.length === 0 || options.dryRun) continue;
-
-    if (entry.snapshot) {
-      for (const agent of missingAgents) {
-        installed.push(
-          installSnapshot(
-            entry.snapshot,
-            entry.candidate,
-            agent,
-            options.scope,
-            options.root,
-            options.home,
-          ),
-        );
-      }
-      continue;
-    }
-
-    const temporary = mkdtempSync(join(tmpdir(), "agent-skill-bootstrap-"));
-    try {
-      const sourcePath = await cli.materialize(
-        entry.candidate.source,
-        entry.candidate.slug,
-        temporary,
-      );
-      if (!existsSync(sourcePath)) {
-        throw new Error(`Official CLI did not produce ${entry.candidate.id}`);
-      }
-      for (const agent of missingAgents) {
-        installed.push(
-          installDirectory(
-            sourcePath,
-            entry.candidate,
-            agent,
-            options.scope,
-            options.root,
-            options.home,
-          ),
-        );
-      }
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
-    }
+  for (const entry of enrichment.accepted) {
+    await installCatalogEntry(entry, options, installed, skipped, cli);
+  }
+  for (const entry of generated) {
+    installGeneratedEntry(entry, options, installed, skipped);
   }
 
+  const required = requiredMap(options.agents, enrichment.accepted, generated);
+  const maintenance =
+    options.config.maintenance.automatic_quarantine && options.maintain
+      ? quarantineManagedSkills(options.root, required, {
+          ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
+          ...(options.home !== undefined ? { home: options.home } : {}),
+        })
+      : { quarantined: [] };
+
   if (!options.dryRun) {
-    markSynced(options.scope, options.root, detection.fingerprint, options.home);
+    persistBriefing(briefing, options.scope, options.home);
+    markSynced(
+      options.scope,
+      options.root,
+      briefing.fingerprint,
+      [
+        ...enrichment.accepted.map((entry) => entry.candidate.id),
+        ...generated.map((entry) => entry.candidate.id),
+      ],
+      options.home,
+    );
   }
   return {
     status: discovery.warnings.length > 0 ? "degraded" : "ok",
     detection,
-    selected: entries.map((entry) => entry.candidate),
+    briefing,
+    selected: enrichment.accepted.map((entry) => entry.candidate),
+    generated: generated.map((entry) => entry.candidate),
     installed,
+    quarantined: maintenance.quarantined,
     skipped,
     warnings: discovery.warnings,
   };
