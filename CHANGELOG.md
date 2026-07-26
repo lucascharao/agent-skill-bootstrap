@@ -29,6 +29,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Grok Build was removed from the initial release because its passive startup
   hooks cannot prove that newly generated context is loaded before the first
   model response.
+- Replaced the MIT license with the Agent Skill Bootstrap Source-Available
+  License. Official copies may be installed and used, but modification and
+  redistribution require prior written permission.
 
 [Unreleased]: https://github.com/lucascharao/agent-skill-bootstrap/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/lucascharao/agent-skill-bootstrap/releases/tag/v0.1.0

@@ -113,8 +113,8 @@ detects skill changes. Project hooks are ignored until the project and exact
 hook definition are trusted.
 
 The installer never approves or bypasses trust. `doctor` reports the hook as
-configured, but not verified as ready, until the user confirms it in the host's
-`/hooks` interface.
+configured and provides host verification instructions; it never infers
+readiness from the hook file alone.
 
 ### Why Grok Build is not included
 
@@ -209,6 +209,11 @@ weaken the user's security floor.
 
 ## Development
 
+The public repository is provided for source visibility, issue reporting, and
+release verification. External source-code contributions are not accepted.
+Authorized maintainers use protected branches and pull requests for every
+change to `main`.
+
 ```bash
 npm install
 npm run check
@@ -223,4 +228,15 @@ not call live services.
 
 ## License
 
-[MIT](LICENSE)
+Agent Skill Bootstrap is source-available proprietary software, not open
+source. The license permits installing and using an official, unmodified copy
+for internal personal or business purposes. It does not permit modifying,
+creating derivative works from, redistributing, sublicensing, selling, or
+hosting the Software without prior written permission.
+
+The GitHub repository and npm package are public, so their contents remain
+technically visible, clonable, and downloadable. The license defines the legal
+permissions; it is not a technical copy-prevention mechanism. Third-party
+components remain under their own licenses.
+
+See the complete [Agent Skill Bootstrap Source-Available License](LICENSE).
