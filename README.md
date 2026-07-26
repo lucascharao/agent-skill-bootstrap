@@ -270,7 +270,9 @@ verified.
 - Bounded manifest inspection; no reading `.env`, credentials, prompt history,
   or arbitrary source files.
 - OIDC credentials sent only to exact allowlisted HTTPS origins.
-- No telemetry.
+- No first-party telemetry is added by Agent Skill Bootstrap. Fallback discovery
+  invokes the official skills CLI, whose anonymous telemetry can be disabled
+  with `DISABLE_TELEMETRY=1` or `DO_NOT_TRACK=1`.
 
 See [SECURITY.md](SECURITY.md) for the threat model and disclosure process.
 
