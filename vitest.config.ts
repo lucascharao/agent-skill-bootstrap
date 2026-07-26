@@ -10,6 +10,7 @@ export default defineConfig({
         "src/config.ts",
         "src/detection.ts",
         "src/generate.ts",
+        "src/hook-output.ts",
         "src/install.ts",
         "src/inventory.ts",
         "src/lock.ts",

@@ -11,7 +11,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { stringify } from "yaml";
-import { briefingContext } from "./briefing.js";
+import { hookFailureOutput, hookSuccessOutput } from "./hook-output.js";
 import {
   loadConfig,
   projectConfigPath,
@@ -525,29 +525,9 @@ async function hook(options: CliOptions): Promise<void> {
   const event = hookInput().hook_event_name ?? "SessionStart";
   try {
     const result = await sync({ ...options, nonInteractive: true }, true);
-    const context = briefingContext(result.briefing, [
-      ...result.selected.map((candidate) => candidate.id),
-      ...result.generated.map((candidate) => candidate.id),
-    ]);
-    output(
-      {
-        continue: true,
-        systemMessage: "Agent Skill Bootstrap completed the project skill check.",
-        hookSpecificOutput: {
-          hookEventName: event,
-          additionalContext: context,
-        },
-      },
-      true,
-    );
+    output(hookSuccessOutput(event, result), true);
   } catch (error) {
-    output(
-      {
-        continue: false,
-        stopReason: `Agent Skill Bootstrap could not prepare this project: ${(error as Error).message}`,
-      },
-      true,
-    );
+    output(hookFailureOutput(error), true);
   }
 }
 
