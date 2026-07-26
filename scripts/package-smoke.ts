@@ -181,7 +181,7 @@ try {
       "--prefix",
       installRoot,
       "--ignore-scripts",
-      "--offline",
+      "--prefer-offline",
       "--no-audit",
       "--no-fund",
       tarball,
