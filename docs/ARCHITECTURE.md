@@ -176,7 +176,9 @@ flowchart TD
 1. Resolve the effective config from defaults, user config, project config,
    environment variables, and CLI flags.
 2. Resolve the project root without walking above the requested boundary.
-3. Acquire a per-project lock. If another sync is running, return immediately.
+3. Acquire a per-project lock. Strict mode waits for the current owner for up to
+   120 seconds. Native mode waits up to 2 seconds and then stops preparation
+   with a fail-closed timeout error.
 4. Build and fingerprint a briefing from relevant manifests. Use cached recommendations when unchanged
    and within TTL.
 5. Detect technologies and produce bounded search queries.
@@ -771,10 +773,12 @@ and a name-only legacy collision is never included in `existing`.
 - HTTP 503 retries with bounded exponential backoff.
 - Invalid API JSON is rejected and never reaches the installer.
 - Partial installs are recorded individually; state is written atomically.
-- Stale locks are recovered only after validating owner PID and age.
-- Strict mode waits for an existing lock owner to finish, validates its result,
-  and times out closed before spawning the agent. Native hooks return a stopped
-  preparation state when the lock budget expires.
+- Lock metadata records the owner PID for diagnostics, but recovery does not
+  probe process liveness. A valid lock is considered stale only by age after
+  120 seconds; invalid lock metadata is recovered immediately.
+- Strict mode waits up to 120 seconds for an existing owner, then acquires the
+  lock and reruns sync (normally using the persisted cache). Native mode waits
+  up to 2 seconds. Both modes fail closed when their lock budget expires.
 - Hook success never claims that a skill is loaded when the host reports a
   restart-required state.
 

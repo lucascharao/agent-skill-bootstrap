@@ -12,6 +12,7 @@ export default defineConfig({
         "src/generate.ts",
         "src/install.ts",
         "src/inventory.ts",
+        "src/lock.ts",
         "src/maintenance.ts",
         "src/policy.ts",
         "src/sync.ts",

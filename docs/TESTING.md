@@ -43,9 +43,12 @@
 - Empty relevant catalog generates a project-local fallback.
 - Stack change quarantines an obsolete managed fallback.
 - Concurrent hook invocations share one lock.
-- Strict concurrent startup waits and consumes the first sync result.
-- Native concurrent startup times out to an explicit in-progress state.
-- Stale lock recovery after a crashed owner process.
+- Strict concurrent startup waits up to 120 seconds, then reruns sync under the
+  lock and may consume the persisted cache.
+- Native concurrent startup waits up to 2 seconds, then stops preparation with
+  a fail-closed timeout error.
+- Locks older than 120 seconds and invalid lock metadata are recovered; the
+  recorded PID is diagnostic and is not used as a liveness probe.
 - Existing Claude and Codex hooks remain unchanged.
 - Partial installation failure persists only successful entries.
 
@@ -58,11 +61,13 @@
 - Verify the pinned persistent runtime works with registry network disabled.
 - Run `scan`, `sync --dry-run`, `doctor`, and `uninstall`.
 - Verify `--json` output contains no ANSI escape codes.
-- Execute hook fixtures for both supported hosts and verify sync precedes the first
-  permitted development action.
+- Execute hook fixtures for both supported hosts and both lifecycle events;
+  verify sync precedes the first permitted development action and that
+  `additionalContext` contains deterministic briefing data and every required
+  managed skill ID.
 - Exercise strict `run` mode and verify the vendor process is not spawned until
   sync succeeds.
-- Exercise hook timeout and fail-closed output without a false ready state.
+- Exercise hook timeout and assert `continue: false` with no false ready state.
 - Cover ambiguous stacks, monorepos, false positives, and unknown projects.
 - Cover API fallback without a token, expired cache, and complete offline mode.
 - Verify uninstall removes only bootstrap-owned hook entries and runtimes.
