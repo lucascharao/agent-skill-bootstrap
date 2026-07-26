@@ -2,7 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BootstrapConfig } from "./config.js";
-import { safeAtomicWrite } from "./fs-safety.js";
+import {
+  assertNoSymlinkPath,
+  assertWithinBoundary,
+  safeAtomicWrite,
+} from "./fs-safety.js";
 import { codexHome } from "./paths.js";
 import type { RuntimeInstall } from "./runtime.js";
 import type { Agent, Scope } from "./types.js";
@@ -32,6 +36,8 @@ function safeJsonUpdate(
   boundary: string,
   mutate: (value: Record<string, unknown>) => boolean,
 ): boolean {
+  assertWithinBoundary(path, boundary);
+  assertNoSymlinkPath(path, boundary);
   const original = existsSync(path) ? readFileSync(path, "utf8") : null;
   let value: Record<string, unknown>;
   try {

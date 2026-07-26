@@ -1,5 +1,10 @@
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { installSnapshot } from "../src/install.js";
@@ -66,38 +71,63 @@ describe("skill installation and inventory", () => {
     ).toBe("global");
   });
 
-  it("recognizes skills installed previously by the official CLI", () => {
+  it("recognizes the global copy layout produced by skills@1.5.19", () => {
     const fixture = temporaryProject();
     cleanups.push(fixture.cleanup);
-    const root = join(fixture.home, ".codex", "skills", candidate.slug);
+    const root = join(fixture.home, ".agents", "skills", "frontend-design");
     mkdirSync(root, { recursive: true });
-    writeFileSync(join(root, "SKILL.md"), "# Existing React skill\n");
-    const computedHash = createHash("sha256")
-      .update("SKILL.md")
-      .update("# Existing React skill\n")
-      .digest("hex");
+    writeFileSync(join(root, "SKILL.md"), "# Existing frontend skill\n");
     writeFileSync(
-      join(fixture.home, ".codex", ".skill-lock.json"),
-      JSON.stringify({
-        version: 3,
-        skills: {
-          [candidate.slug]: {
-            source: candidate.source,
-            computedHash,
-          },
-        },
-      }),
+      join(fixture.home, ".agents", ".skill-lock.json"),
+      readFileSync(
+        join(process.cwd(), "tests", "fixtures", "skills-1.5.19-global-lock.json"),
+        "utf8",
+      ),
     );
 
     expect(
-      alreadyInstalled(candidate.id, "codex", "project", fixture.root, fixture.home),
+      alreadyInstalled(
+        "anthropics/skills/frontend-design",
+        "codex",
+        "project",
+        fixture.root,
+        fixture.home,
+      ),
     ).toEqual(
       expect.objectContaining({
-        id: candidate.id,
-        hash: computedHash,
+        id: "anthropics/skills/frontend-design",
         scope: "global",
+        path: root,
       }),
     );
+  });
+
+  it("recognizes an official global symlink only when it targets the canonical copy", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const canonical = join(fixture.home, ".agents", "skills", "frontend-design");
+    const binding = join(fixture.home, ".claude", "skills", "frontend-design");
+    mkdirSync(canonical, { recursive: true });
+    mkdirSync(join(fixture.home, ".claude", "skills"), { recursive: true });
+    writeFileSync(join(canonical, "SKILL.md"), "# Existing frontend skill\n");
+    symlinkSync(canonical, binding);
+    writeFileSync(
+      join(fixture.home, ".agents", ".skill-lock.json"),
+      readFileSync(
+        join(process.cwd(), "tests", "fixtures", "skills-1.5.19-global-lock.json"),
+        "utf8",
+      ),
+    );
+
+    expect(
+      alreadyInstalled(
+        "anthropics/skills/frontend-design",
+        "claude-code",
+        "project",
+        fixture.root,
+        fixture.home,
+      ),
+    ).toEqual(expect.objectContaining({ scope: "global", path: binding }));
   });
 
   it("rejects path traversal in API snapshots", () => {

@@ -1,4 +1,10 @@
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.js";
@@ -174,6 +180,72 @@ describe("hook installation", () => {
     expect(() =>
       installHooks(
         ["codex"],
+        "project",
+        fixture.root,
+        runtime,
+        parseConfig({}),
+        fixture.home,
+      ),
+    ).toThrow(/symlinked managed path/);
+  });
+
+  it("refuses an idempotent hook update through a symlinked parent", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const runtime: RuntimeInstall = {
+      root: "/runtime",
+      cli: "/runtime/cli.js",
+      skillsBinary: "/runtime/skills.mjs",
+      node: "/absolute/node",
+    };
+    installHooks(
+      ["codex"],
+      "project",
+      fixture.root,
+      runtime,
+      parseConfig({}),
+      fixture.home,
+    );
+    renameSync(join(fixture.root, ".codex"), join(fixture.root, "actual-codex"));
+    symlinkSync(join(fixture.root, "actual-codex"), join(fixture.root, ".codex"));
+
+    expect(() =>
+      installHooks(
+        ["codex"],
+        "project",
+        fixture.root,
+        runtime,
+        parseConfig({}),
+        fixture.home,
+      ),
+    ).toThrow(/symlinked managed path/);
+  });
+
+  it("refuses an idempotent hook update through a symlinked file", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const path = hookPath("claude-code", "project", fixture.root, fixture.home);
+    const target = join(fixture.root, "settings-target.json");
+    const runtime: RuntimeInstall = {
+      root: "/runtime",
+      cli: "/runtime/cli.js",
+      skillsBinary: "/runtime/skills.mjs",
+      node: "/absolute/node",
+    };
+    installHooks(
+      ["claude-code"],
+      "project",
+      fixture.root,
+      runtime,
+      parseConfig({}),
+      fixture.home,
+    );
+    renameSync(path, target);
+    symlinkSync(target, path);
+
+    expect(() =>
+      installHooks(
+        ["claude-code"],
         "project",
         fixture.root,
         runtime,

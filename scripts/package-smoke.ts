@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -28,6 +29,39 @@ interface InitOutput {
 interface HookOutput {
   continue?: boolean;
   hookSpecificOutput?: { additionalContext?: string };
+}
+
+function installedHookCommand(
+  agent: string,
+  scope: string,
+  root: string,
+  home: string,
+  codexHome: string,
+): string {
+  const path =
+    agent === "claude-code"
+      ? join(scope === "project" ? root : home, ".claude", "settings.json")
+      : scope === "project"
+        ? join(root, ".codex", "hooks.json")
+        : join(codexHome, "hooks.json");
+  if (!existsSync(path)) throw new Error(`Installed hook is missing: ${path}`);
+  const value = JSON.parse(readFileSync(path, "utf8")) as {
+    hooks?: {
+      SessionStart?: Array<{
+        hooks?: Array<{ type?: string; command?: string }>;
+      }>;
+    };
+  };
+  const commands = (value.hooks?.SessionStart ?? [])
+    .flatMap((entry) => entry.hooks ?? [])
+    .filter(
+      (handler) => handler.type === "command" && typeof handler.command === "string",
+    )
+    .map((handler) => handler.command as string);
+  if (commands.length !== 1) {
+    throw new Error(`Expected one installed SessionStart command in ${path}`);
+  }
+  return commands[0]!;
 }
 
 function run(command: string, args: string[], options: RunOptions = {}): string {
@@ -106,28 +140,18 @@ function smokeCombination(cli: string, agent: string, scope: string): void {
     scope === "project"
       ? join(root, ".agent-skill-bootstrap", "runtime", "0.1.0", "cli.js")
       : join(home, ".config", "agent-skill-bootstrap", "runtime", "0.1.0", "cli.js");
+  const command = installedHookCommand(agent, scope, root, home, codexHome);
+  if (!command.includes(runtimeCli)) {
+    throw new Error(`Installed hook does not reference its persistent runtime`);
+  }
   const hookOutput = JSON.parse(
-    run(
-      process.execPath,
-      [
-        runtimeCli,
-        "hook",
-        "--agent",
-        agent,
-        "--scope",
-        scope,
-        ...(scope === "project" ? ["--root", root] : []),
-        "--owner",
-        `agent-skill-bootstrap:v1:${scope}:${agent}`,
-      ],
-      {
-        env,
-        input: JSON.stringify({
-          hook_event_name: "SessionStart",
-          cwd: root,
-        }),
-      },
-    ),
+    run("/bin/sh", ["-c", command], {
+      env,
+      input: JSON.stringify({
+        hook_event_name: "SessionStart",
+        cwd: root,
+      }),
+    }),
   ) as HookOutput;
   if (
     hookOutput.continue !== true ||

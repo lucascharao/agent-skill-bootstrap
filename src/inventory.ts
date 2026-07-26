@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -81,6 +87,55 @@ function readExternalLocks(
   return skills;
 }
 
+function canonicalGlobalSkillPath(slug: string, home?: string): string {
+  return join(home ?? homedir(), ".agents", "skills", slug);
+}
+
+function validExternalBinding(
+  path: string,
+  root: string,
+  slug: string,
+  external: ExternalLockEntry,
+  agent: Agent,
+  scope: Scope,
+  home?: string,
+): InstalledSkill | null {
+  try {
+    if (!external.source || !existsSync(path)) return null;
+    const canonical = canonicalGlobalSkillPath(slug, home);
+    let contentPath = path;
+
+    if (lstatSync(path).isSymbolicLink()) {
+      if (scope !== "global" || !external.skillFolderHash) return null;
+      assertNoSymlinkPath(dirname(path), root);
+      assertNoSymlinkPath(canonical, home ?? homedir());
+      if (realpathSync(path) !== realpathSync(canonical)) return null;
+      contentPath = canonical;
+    } else {
+      assertNoSymlinkPath(path, root);
+    }
+
+    if (!existsSync(join(contentPath, "SKILL.md"))) return null;
+    const digest = externalDirectoryDigest(contentPath);
+    if (external.computedHash && digest !== external.computedHash) return null;
+    if (!external.computedHash && !(scope === "global" && external.skillFolderHash)) {
+      return null;
+    }
+
+    return {
+      id: `${external.source}/${slug}`,
+      slug,
+      source: external.source,
+      hash: digest,
+      agent,
+      scope,
+      path,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function readManifest(skillPath: string): InstallManifest | null {
   const manifestPath = join(skillPath, ".agent-skill-bootstrap.json");
   try {
@@ -131,40 +186,55 @@ export function inventory(
   const externalLocks = readExternalLocks(scope, projectRoot, home);
   for (const agent of AGENTS) {
     const root = skillRoot(agent, scope, projectRoot, home);
-    if (!existsSync(root)) continue;
-    for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      const path = join(root, entry.name);
+    const names = new Set<string>();
+    if (existsSync(root)) {
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (entry.isDirectory() || entry.isSymbolicLink()) names.add(entry.name);
+      }
+    }
+    if (scope === "global" && agent === "codex") {
+      const canonicalRoot = dirname(canonicalGlobalSkillPath("placeholder", home));
+      if (existsSync(canonicalRoot)) {
+        for (const entry of readdirSync(canonicalRoot, { withFileTypes: true })) {
+          if (entry.isDirectory() && !entry.isSymbolicLink()) names.add(entry.name);
+        }
+      }
+    }
+    for (const name of names) {
+      const rootPath = join(root, name);
+      const path =
+        existsSync(rootPath) || lstatExists(rootPath)
+          ? rootPath
+          : canonicalGlobalSkillPath(name, home);
       const managed = validManagedBinding(path, undefined, root);
       if (managed && managed.agent === agent && managed.scope === scope) {
         installed.push(managed);
         continue;
       }
-      const external = externalLocks[entry.name];
-      if (!external?.source || !existsSync(join(path, "SKILL.md"))) continue;
-      try {
-        assertNoSymlinkPath(path, root);
-        if (
-          !external.computedHash ||
-          externalDirectoryDigest(path) !== external.computedHash
-        ) {
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      installed.push({
-        id: `${external.source}/${entry.name}`,
-        slug: entry.name,
-        source: external.source,
-        hash: external.computedHash,
+      const external = externalLocks[name];
+      if (!external) continue;
+      const valid = validExternalBinding(
+        path,
+        path === rootPath ? root : dirname(path),
+        name,
+        external,
         agent,
         scope,
-        path,
-      });
+        home,
+      );
+      if (valid) installed.push(valid);
     }
   }
   return installed;
+}
+
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function alreadyInstalled(
