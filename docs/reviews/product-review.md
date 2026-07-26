@@ -1,40 +1,23 @@
-# Product Architecture Review
+# Product Review
 
-Reviewer: Pax, Product Owner perspective
+Reviewer: Product Owner gate
 
-Date: 2026-07-25
+Date: 2026-07-26
 
-Initial decision: CHANGES_REQUIRED
+Status: Approved direction; implementation evidence pending
 
-## Findings
+## Release direction
 
-The initial design required stronger contracts for:
+Version 0.1 must promise only behavior that can be demonstrated from the packed
+artifact:
 
-1. Deduplication by skill and target agent.
-2. A persistent offline-capable runtime after transient `npx` initialization.
-3. Deterministic relevance scoring and no-install behavior below confidence.
-4. A formal best-effort versus strict pre-start guarantee.
-5. Per-project isolation for global cache, state, and locks.
+- Claude Code and Codex
+- macOS and Linux
+- Project and current-user scopes
+- One fail-closed `SessionStart` hook
+- Immutable audited catalog snapshots or safe project-local fallback
+- Global-first deduplication without false cache readiness
+- Recoverable maintenance limited to package-owned skills
 
-Additional tests were requested for partial agent coverage, actual hook
-execution, stale locks, timeouts, offline behavior, owned uninstall, rollback,
-malicious arguments, version compatibility, and packaged offline startup.
-
-## Resolution
-
-All five contracts and their requested acceptance tests were added to
-`docs/ARCHITECTURE.md`, `docs/adr/0001-hybrid-lifecycle-bootstrap.md`, and
-`docs/TESTING.md`.
-
-The first re-review confirmed items 1, 4, and 5, and requested two final
-corrections:
-
-- Replace `npx skills@latest` in hooks with a runtime-local exact version.
-- Specify the complete normalized relevance formula and contract examples.
-
-The architecture now pins `skills@1.5.19`, invokes its local executable, raises
-the Node.js floor to match the vendor package, and defines scoring weights,
-required-term behavior, missing metadata behavior, multi-workspace selection,
-tie-breaking, and fixtures.
-
-Final decision: APPROVE.
+Grok Build, Windows, command wrappers, mutable automatic installation, and
+unverifiable readiness claims are outside the 0.1 contract.

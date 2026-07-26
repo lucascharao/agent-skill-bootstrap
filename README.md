@@ -1,29 +1,41 @@
 # Agent Skill Bootstrap
 
-Install once, then let Claude Code or Codex start every project with the right
-briefing and only the skills it needs.
+Prepare the project briefing and required skills before Claude Code or Codex
+starts development.
 
-Agent Skill Bootstrap is a local-first CLI distributed through `npx`. It
-detects a project's stack from known manifests, searches
-[skills.sh](https://skills.sh), applies security and relevance policy, skips
-skills already available globally or locally, and prepares the project before
-the coding agent handles the first prompt.
+Agent Skill Bootstrap is a local-first CLI distributed through `npx`. After one
+setup, an owned `SessionStart` hook detects the project, checks the
+[skills.sh](https://skills.sh) catalog, validates existing bindings, installs
+only immutable audited snapshots, and creates a safe project-local skill when
+the catalog cannot provide one.
 
-## One-time setup
+## Supported contract for 0.1.0
+
+- Hosts: Claude Code and Codex
+- Operating systems: macOS and Linux
+- Scopes: current project or current user
+- Lifecycle event: `SessionStart`
+- Trust: the user must approve the hook in the host
+- Failure behavior: preparation errors return `continue: false`
+
+Windows and Grok Build are not promised by this release. The project does not
+bypass host trust, enterprise policy, disabled hooks, or unavailable
+filesystems.
+
+## Install once
 
 Requirements:
 
-- Node.js 22.20 or newer
-- Git for the official skills CLI fallback
+- Node.js 22.20.0 or newer
 - Claude Code, Codex, or both
 
-Run:
+After the npm release:
 
 ```bash
 npx agent-skill-bootstrap
 ```
 
-Before the first npm release, use:
+Until then:
 
 ```bash
 npx github:lucascharao/agent-skill-bootstrap
@@ -31,146 +43,94 @@ npx github:lucascharao/agent-skill-bootstrap
 
 The installer asks only:
 
-1. Whether the automation belongs to this project or the current user
-2. Which supported coding agents should use it
+1. Whether automation belongs to this project or the current user
+2. Which supported agents should use it
 
-It then installs a persistent, versioned runtime, merges owned lifecycle hooks
-without replacing existing hooks, builds the first project briefing, and runs
-the first skill cycle.
+It then installs a pinned persistent runtime, merges one owned `SessionStart`
+entry without replacing unrelated hooks, creates the first briefing, and runs
+the first safe skill cycle.
 
-Project scope stores configuration and skills in the repository. User scope
-installs the runtime and reusable catalog skills for the current user; generated
-fallback skills remain project-local.
+## Automatic startup flow
 
-## What happens automatically
+After the host approves the hook, every supported session start:
 
-After setup, no recurring command is required. At session start and before the
-first prompt, the installed hooks:
+1. Resolves the project from the trusted event `cwd`
+2. Detects technologies from bounded manifests and known configuration files
+3. Builds a deterministic project briefing and fingerprint
+4. Revalidates cached bindings, manifests, files, and content digests
+5. Searches skills.sh through its authenticated API or pinned official CLI
+6. Admits only immutable API snapshots that pass audit and relevance policy
+7. Reuses an existing verified global or local binding when available
+8. Creates an instruction-only project skill when no safe snapshot qualifies
+9. Quarantines obsolete package-owned project skills
+10. Injects only the sanitized briefing and verified managed skill IDs
 
-1. Detect the project from bounded manifest and configuration evidence
-2. Build a deterministic briefing and fingerprint
-3. Search the skills.sh catalog or the pinned official skills CLI
-4. Apply relevance, trusted-owner, duplicate, and audit policy
-5. Check global inventory before project inventory
-6. Install only missing agent bindings
-7. Generate a safe project-local skill when no catalog skill qualifies
-8. Quarantine package-owned skills that became obsolete
-9. Add the briefing and managed skill list to the agent context
+The official CLI is used for discovery only when an immutable audited API
+snapshot is unavailable. A mutable branch, tag, or repository result is never
+materialized automatically.
 
-Unchanged projects use a fast cache. A changed manifest triggers a fresh cycle.
+## Installation paths
+
+| Host        | Project          | Current user                     |
+| ----------- | ---------------- | -------------------------------- |
+| Claude Code | `.claude/skills` | `~/.claude/skills`               |
+| Codex       | `.agents/skills` | `${CODEX_HOME:-~/.codex}/skills` |
+
+Codex user hooks follow the same home:
+`${CODEX_HOME:-~/.codex}/hooks.json`.
+
+Global state is isolated per canonical project:
+
+```text
+~/.config/agent-skill-bootstrap/projects/<project-hash>/
+```
+
+Generated fallback skills always remain inside the project, including when the
+installer itself uses current-user scope.
 
 ## Generated fallback skills
 
-When no relevant and safe catalog entry exists, Agent Skill Bootstrap creates a
-small instruction-only `SKILL.md` from verified project evidence.
+When no relevant immutable snapshot passes policy, the CLI generates a small
+deterministic `SKILL.md` from verified project evidence.
 
 Generated skills:
 
-- Are deterministic for the same briefing
-- Contain only `name`, `description`, bounded evidence, workflow, and safety
-  boundaries
-- Never include `.env`, credentials, prompt history, or arbitrary source code
-- Never include executable scripts or destructive commands
-- Are always project-local and marked as owned by this package
-- Are replaced by a qualifying catalog skill when one later becomes available
+- Contain instructions only, never scripts or executable assets
+- Never read `.env`, credentials, prompt history, or arbitrary source files
+- Remain project-local
+- Carry an Agent Skill Bootstrap ownership manifest and content digest
+- Can be moved only to recoverable quarantine, never automatically deleted
 
 ## Automatic maintenance
 
-Only skills with an Agent Skill Bootstrap ownership manifest are eligible for
-automatic maintenance. When one is no longer justified by the current
-briefing, it is moved to:
+Only directories with a valid ownership manifest and matching content digest
+are managed. Obsolete skills are moved to:
 
 ```text
 .agent-skill-bootstrap/quarantine/
 ```
 
-Automatic maintenance never permanently deletes a skill. Unmanaged skills,
-links, hooks, and configuration are never moved or overwritten.
+Unmanaged skills and third-party hooks are preserved. A third-party hook merely
+mentioning the package name or marker is not considered owned.
 
-Advanced diagnostic commands are available but are not required for normal use:
+Diagnostic commands are optional:
 
 ```bash
+agent-skill-bootstrap scan
+agent-skill-bootstrap sync
 agent-skill-bootstrap analyze
 agent-skill-bootstrap prune --dry-run
 agent-skill-bootstrap prune --yes
 agent-skill-bootstrap quarantine
 agent-skill-bootstrap restore <skill-id-or-slug> --yes
 agent-skill-bootstrap doctor
+agent-skill-bootstrap uninstall --yes
 ```
 
-## Supported hosts and trust
-
-### Claude Code
-
-Claude Code supports `SessionStart` and `UserPromptSubmit` hooks, context
-injection, and live skill reload. Project hooks still require the host's trust
-approval.
-
-### Codex
-
-Codex supports `SessionStart` and `UserPromptSubmit` hooks and automatically
-detects skill changes. Project hooks are ignored until the project and exact
-hook definition are trusted.
-
-The installer never approves or bypasses trust. `doctor` reports the hook as
-configured and provides host verification instructions; it never infers
-readiness from the hook file alone.
-
-### Why Grok Build is not included
-
-Grok Build is intentionally excluded from `0.1.0`. Its official hook contract
-documents `SessionStart` and `UserPromptSubmit` as passive events whose stdout
-is ignored; only `PreToolUse` can block. That does not prove that a newly
-generated briefing and skill are loaded before the first model response, so the
-project does not promise support it cannot verify.
-
-## Discovery and security
-
-The authenticated skills.sh API is preferred when a Vercel OIDC token is
-available. Otherwise native mode uses the exact bundled version of the official
-`skills` CLI. API installs fetch the detailed file snapshot after partner audit
-checks; CLI fallback candidates are limited to configured trusted owners.
-
-Default skill directories:
-
-| Agent       | Project          | User               |
-| ----------- | ---------------- | ------------------ |
-| Claude Code | `.claude/skills` | `~/.claude/skills` |
-| Codex       | `.agents/skills` | `~/.agents/skills` |
-
-Security properties:
-
-- External process arguments never use a shell
-- Credentials are sent only to exact allowlisted HTTPS origins
-- Redirects never forward credentials across origins
-- Snapshot paths, size, symlinks, and digest are validated
-- Writes use staging and atomic rename
-- Hook JSON is backed up and merged
-- Global inventory is checked before project installation
-- No telemetry is collected
-
-See [SECURITY.md](SECURITY.md) for the threat model.
-
-## Advanced CLI
-
-```text
-agent-skill-bootstrap [init]             One-time setup and first cycle
-agent-skill-bootstrap scan               Show project detection evidence
-agent-skill-bootstrap sync               Run discovery manually
-agent-skill-bootstrap analyze            Explain skill lifecycle decisions
-agent-skill-bootstrap prune              Preview or quarantine obsolete skills
-agent-skill-bootstrap quarantine         List recoverable skills
-agent-skill-bootstrap restore            Restore a quarantined skill
-agent-skill-bootstrap doctor             Diagnose runtime and hooks
-agent-skill-bootstrap run <claude|codex> Strict launcher fallback
-agent-skill-bootstrap uninstall --yes    Remove owned hooks and runtime
-```
-
-Useful automation flags:
+Useful flags:
 
 ```text
 --scope project|global
---mode native|strict
 --agents claude-code,codex
 --root <path>
 --dry-run
@@ -179,64 +139,67 @@ Useful automation flags:
 --non-interactive
 ```
 
-Strict launcher mode is available when a managed environment disables hooks:
+## Trust and diagnostics
+
+The installer cannot approve its own hook. `doctor` distinguishes installation
+health from host readiness:
+
+- `supported-and-verified`: reserved for explicit host verification evidence
+- `trust-required`: runtime and hook are installed but host approval is pending
+- `installed-but-unverified`: files exist but the runtime cannot be verified
+- `unsupported`: the host, platform, or installation is outside the 0.1 contract
+
+No success message claims that a host loaded the hook when approval cannot be
+verified.
+
+## Security properties
+
+- Exact structured `--owner` markers for hook update and removal
+- Compare-and-swap plus atomic replacement for hook JSON
+- Symlink rejection for managed boundaries, parents, staging, and destinations
+- Path containment based on platform path semantics, not string prefixes
+- Immutable snapshot, audit, size, file, and content-digest validation
+- Per-project state, cache, briefing, and sync lock
+- Cache invalidation when any required binding or asset changes
+- No shell execution for external process arguments
+- OIDC credentials sent only to exact allowlisted HTTPS origins
+- No telemetry
+
+See [SECURITY.md](SECURITY.md) for the threat model.
+
+## Verification
+
+The CI release gate runs:
 
 ```bash
-agent-skill-bootstrap run codex
-agent-skill-bootstrap run claude -- --model sonnet
+npm run format:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run test:coverage
+npm audit --omit=dev
+npm run smoke:package
+npm pack --dry-run
 ```
 
-No third-party package can force an agent host to execute a disabled or
-untrusted hook. The project reports that state as a limitation instead of
-claiming the project is ready.
+The package smoke installs the real tarball in clean temporary homes and
+exercises init, `SessionStart`, briefing/context creation, safe sync, and
+uninstall for Claude Code and Codex in both declared scopes.
 
-## Configuration
+## Repository and license
 
-Project configuration:
-
-```text
-.agent-skill-bootstrap/config.yaml
-```
-
-User configuration:
-
-```text
-~/.config/agent-skill-bootstrap/config.yaml
-```
-
-See [config/default.yaml](config/default.yaml). Project configuration cannot
-weaken the user's security floor.
-
-## Development
-
-The public repository is provided for source visibility, issue reporting, and
+The public repository is available for source visibility, issue reporting, and
 release verification. External source-code contributions are not accepted.
-Authorized maintainers use protected branches and pull requests for every
-change to `main`.
-
-```bash
-npm install
-npm run check
-```
-
-The implementation is TypeScript ESM. Tests use isolated temporary homes and do
-not call live services.
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Lifecycle ADR](docs/adr/0001-hybrid-lifecycle-bootstrap.md)
-- [Testing strategy](docs/TESTING.md)
-
-## License
+Protected branches and pull requests guard the upstream repository.
 
 Agent Skill Bootstrap is source-available proprietary software, not open
-source. The license permits installing and using an official, unmodified copy
-for internal personal or business purposes. It does not permit modifying,
-creating derivative works from, redistributing, sublicensing, selling, or
-hosting the Software without prior written permission.
+source. Official unmodified copies may be installed and used under the terms in
+[LICENSE](LICENSE). Modification, derivative works, redistribution,
+sublicensing, resale, or hosted redistribution require prior written
+permission. Generated project output remains available for the user's own
+projects as described by the license.
 
-The GitHub repository and npm package are public, so their contents remain
-technically visible, clonable, and downloadable. The license defines the legal
-permissions; it is not a technical copy-prevention mechanism. Third-party
-components remain under their own licenses.
-
-See the complete [Agent Skill Bootstrap Source-Available License](LICENSE).
+- [Architecture](docs/ARCHITECTURE.md)
+- [Lifecycle decision](docs/adr/0001-hybrid-lifecycle-bootstrap.md)
+- [Testing strategy](docs/TESTING.md)

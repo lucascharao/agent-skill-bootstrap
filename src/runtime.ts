@@ -1,18 +1,22 @@
-import { spawn } from "node:child_process";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertNoSymlinkPath,
+  assertWithinBoundary,
+  ensureSafeDirectory,
+  safeAtomicWrite,
+} from "./fs-safety.js";
 import { runtimeRoot } from "./paths.js";
 import type { Scope } from "./types.js";
 
 export const VERSION = "0.1.0";
 export const SKILLS_VERSION = "1.5.19";
+
+export function platformSupported(platform = process.platform): boolean {
+  return platform === "darwin" || platform === "linux";
+}
 
 export function nodeSupported(version = process.versions.node): boolean {
   const [major = 0, minor = 0] = version.split(".").map(Number);
@@ -25,6 +29,9 @@ export function assertSupportedNode(): void {
       `Node.js 22.20.0 or newer is required; current version is ${process.version}`,
     );
   }
+  if (!platformSupported()) {
+    throw new Error("Only macOS and Linux are supported in version 0.1.0");
+  }
 }
 
 export function findSkillsBinary(
@@ -33,70 +40,45 @@ export function findSkillsBinary(
   const candidates = [
     join(base, "node_modules", "skills", "bin", "cli.mjs"),
     join(base, "..", "node_modules", "skills", "bin", "cli.mjs"),
+    join(base, "..", "..", "skills", "bin", "cli.mjs"),
   ];
   const found = candidates.find(existsSync);
   if (!found) {
-    throw new Error("Pinned official skills CLI is missing; run doctor --repair");
+    throw new Error(
+      "Pinned official skills CLI is missing; rerun agent-skill-bootstrap setup",
+    );
   }
   return found;
-}
-
-function runNpmInstall(cwd: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const npmExecPath = process.env.npm_execpath;
-    const child = npmExecPath
-      ? spawn(
-          process.execPath,
-          [
-            npmExecPath,
-            "install",
-            "--omit=dev",
-            "--no-audit",
-            "--no-fund",
-            "--loglevel=error",
-          ],
-          { cwd, shell: false, stdio: "inherit" },
-        )
-      : spawn(
-          "npm",
-          ["install", "--omit=dev", "--no-audit", "--no-fund", "--loglevel=error"],
-          { cwd, shell: false, stdio: "inherit" },
-        );
-    child.once("error", reject);
-    child.once("close", (code) =>
-      code === 0
-        ? resolve()
-        : reject(new Error(`npm install failed with exit code ${code}`)),
-    );
-  });
 }
 
 export interface RuntimeInstall {
   root: string;
   cli: string;
   skillsBinary: string;
+  node: string;
 }
 
-export async function installRuntime(
+export function installRuntime(
   scope: Scope,
   projectRoot: string,
   home?: string,
-): Promise<RuntimeInstall> {
+): RuntimeInstall {
   assertSupportedNode();
   const root = join(runtimeRoot(scope, projectRoot, home), VERSION);
   const cli = join(root, "cli.js");
   const skillsBinary = join(root, "node_modules", "skills", "bin", "cli.mjs");
-  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const boundary = scope === "global" ? (home ?? homedir()) : projectRoot;
+  ensureSafeDirectory(root, boundary);
   if (!existsSync(cli)) {
     const current = fileURLToPath(import.meta.url);
     if (!current.endsWith(".js")) {
       throw new Error("Build the project before installing the persistent runtime");
     }
-    copyFileSync(current, cli);
+    safeAtomicWrite(cli, readFileSync(current, "utf8"), boundary, { mode: 0o700 });
   }
   const packagePath = join(root, "package.json");
   if (!existsSync(packagePath)) {
-    writeFileSync(
+    safeAtomicWrite(
       packagePath,
       `${JSON.stringify(
         {
@@ -107,15 +89,53 @@ export async function installRuntime(
         null,
         2,
       )}\n`,
-      { mode: 0o600 },
+      boundary,
     );
   }
-  if (!existsSync(skillsBinary)) await runNpmInstall(root);
-  return { root, cli, skillsBinary };
+  assertNoSymlinkPath(root, boundary);
+  if (!existsSync(skillsBinary)) {
+    const packagedBinary = findSkillsBinary();
+    const packagedRoot = dirname(dirname(packagedBinary));
+    const destination = join(root, "node_modules", "skills");
+    ensureSafeDirectory(dirname(destination), boundary);
+    try {
+      cpSync(packagedRoot, destination, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        dereference: false,
+        filter: (source) => {
+          if (lstatSync(source).isSymbolicLink()) {
+            throw new Error(`Refusing symlinked runtime dependency: ${source}`);
+          }
+          return true;
+        },
+      });
+    } catch (error) {
+      assertWithinBoundary(destination, boundary);
+      try {
+        lstatSync(destination);
+        rmSync(destination, { recursive: true, force: true });
+      } catch {
+        // The original copy failure remains the actionable diagnostic. A
+        // leftover destination is fail-closed on the next installation.
+      }
+      throw error;
+    }
+  }
+  assertNoSymlinkPath(root, boundary);
+  return { root, cli, skillsBinary, node: process.execPath };
 }
 
 export function runtimeHealthy(runtime: RuntimeInstall): boolean {
-  if (!existsSync(runtime.cli) || !existsSync(runtime.skillsBinary)) return false;
+  if (
+    !existsSync(runtime.cli) ||
+    !existsSync(runtime.skillsBinary) ||
+    !runtime.node ||
+    !existsSync(runtime.node)
+  ) {
+    return false;
+  }
   try {
     const pkg = JSON.parse(
       readFileSync(

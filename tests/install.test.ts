@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { installSnapshot } from "../src/install.js";
@@ -68,17 +69,21 @@ describe("skill installation and inventory", () => {
   it("recognizes skills installed previously by the official CLI", () => {
     const fixture = temporaryProject();
     cleanups.push(fixture.cleanup);
-    const root = join(fixture.home, ".agents", "skills", candidate.slug);
+    const root = join(fixture.home, ".codex", "skills", candidate.slug);
     mkdirSync(root, { recursive: true });
     writeFileSync(join(root, "SKILL.md"), "# Existing React skill\n");
+    const computedHash = createHash("sha256")
+      .update("SKILL.md")
+      .update("# Existing React skill\n")
+      .digest("hex");
     writeFileSync(
-      join(fixture.home, ".agents", ".skill-lock.json"),
+      join(fixture.home, ".codex", ".skill-lock.json"),
       JSON.stringify({
         version: 3,
         skills: {
           [candidate.slug]: {
             source: candidate.source,
-            skillFolderHash: "existing-hash",
+            computedHash,
           },
         },
       }),
@@ -89,7 +94,7 @@ describe("skill installation and inventory", () => {
     ).toEqual(
       expect.objectContaining({
         id: candidate.id,
-        hash: "existing-hash",
+        hash: computedHash,
         scope: "global",
       }),
     );
@@ -113,5 +118,39 @@ describe("skill installation and inventory", () => {
       ),
     ).toThrow(/Unsafe skill file path/);
     expect(existsSync(join(fixture.root, ".agents", "escape"))).toBe(false);
+  });
+
+  it("rejects a symlinked skill root before writing outside the project", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const outside = join(fixture.root, "outside");
+    mkdirSync(join(fixture.root, ".agents"), { recursive: true });
+    mkdirSync(outside);
+    symlinkSync(outside, join(fixture.root, ".agents", "skills"));
+
+    expect(() =>
+      installSnapshot(
+        snapshot,
+        candidate,
+        "codex",
+        "project",
+        fixture.root,
+        fixture.home,
+      ),
+    ).toThrow(/symlinked managed path/);
+    expect(existsSync(join(outside, candidate.slug))).toBe(false);
+  });
+
+  it("rejects a symlinked project boundary", () => {
+    const fixture = temporaryProject();
+    cleanups.push(fixture.cleanup);
+    const actual = join(fixture.root, "actual");
+    const linked = join(fixture.root, "linked");
+    mkdirSync(actual);
+    symlinkSync(actual, linked);
+
+    expect(() =>
+      installSnapshot(snapshot, candidate, "codex", "project", linked, fixture.home),
+    ).toThrow(/symlinked managed path/);
   });
 });

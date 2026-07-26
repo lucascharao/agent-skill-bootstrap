@@ -1,35 +1,18 @@
-# Risks and Mitigation Strategy
+# Risks and mitigations
 
-## Risks
-
-- **API authentication unavailable:** A local machine may not have a Vercel OIDC
-  token. Severity: high.
-- **Untrusted skill installation:** A catalog result may contain malicious or
-  unsafe instructions. Severity: high.
-- **Startup latency:** Network discovery on every session can delay the agent.
-  Severity: medium.
-- **Concurrent startup:** Multiple agents may race to install the same skill.
-  Severity: medium.
-- **Hook disabled or untrusted:** A host may skip the automatic bootstrap.
-  Severity: high.
-- **Runtime refresh gap:** A host may not expose a newly installed skill until
-  restart. Severity: medium.
-- **Configuration corruption:** Merging hooks may damage existing settings.
-  Severity: high.
-
-## Mitigation Strategy
-
-- API authentication unavailable is addressed by the official `skills find`
-  fallback and explicit provider diagnostics.
-- Untrusted skill installation is addressed by audit checks, trusted-owner
-  policy, duplicate filtering, copy mode, dry-run, and an install cap.
-- Startup latency is addressed by manifest fingerprints, a bounded timeout,
-  process locks, and a 24-hour cache.
-- Concurrent startup is addressed by an atomic per-project lock and an
-  idempotent global-first inventory check.
-- Disabled or untrusted hooks are addressed by transparent trust instructions,
-  `doctor`, and the explicit `sync` command.
-- Runtime refresh gaps are addressed by a restart notice and agent-specific
-  discovery verification.
-- Configuration corruption is addressed by schema validation, owned-entry
-  merging, backups, atomic writes, and fixture-based integration tests.
+- **API authentication unavailable — high.** The pinned official CLI performs
+  discovery only. The runtime generates an instruction-only project skill and
+  does not execute mutable remote content.
+- **Untrusted skill content — high.** Automatic catalog installation requires
+  relevance, audit, allowed risk, immutable hash, complete snapshot, safe
+  paths, and matching digest.
+- **False-ready cache — high.** TTL and fingerprint are never sufficient;
+  expected bindings, ownership, files, symlinks, and digests are revalidated.
+- **Concurrent startup — medium.** State and locks are isolated per canonical
+  project. Atomic creation serializes sync.
+- **Hook disabled or untrusted — high.** Trust is never bypassed. `doctor`
+  reports the distinction and preparation failures return `continue: false`.
+- **Configuration corruption — high.** Exact ownership, backup, symlink
+  rejection, compare-and-swap, and atomic rename preserve third-party data.
+- **Unsupported host/platform — medium.** Version 0.1 promises only Claude Code
+  and Codex on macOS/Linux, backed by package smoke for both scopes.

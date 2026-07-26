@@ -1,14 +1,19 @@
 import {
   existsSync,
   lstatSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
+import {
+  assertNoSymlinkPath,
+  assertWithinBoundary,
+  ensureSafeDirectory,
+  isWithinBoundary,
+  safeAtomicWrite,
+} from "./fs-safety.js";
 import { readManifest } from "./inventory.js";
 import { quarantineRoot, skillRoot } from "./paths.js";
 import { AGENTS } from "./types.js";
@@ -28,9 +33,7 @@ export interface SkillAnalysis {
 }
 
 function safeChild(path: string, root: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedPath = resolve(path);
-  return resolvedPath.startsWith(`${resolvedRoot}${sep}`);
+  return path !== root && isWithinBoundary(path, root);
 }
 
 export function analyzeManagedSkills(
@@ -99,17 +102,21 @@ export function quarantineManagedSkills(
     };
     quarantined.push(record);
     if (options.dryRun || existsSync(destination)) continue;
-    mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+    assertNoSymlinkPath(projectRoot);
+    assertNoSymlinkPath(skill.path);
+    assertWithinBoundary(destination, base);
+    ensureSafeDirectory(dirname(destination), projectRoot);
+    assertNoSymlinkPath(destination);
     renameSync(skill.path, destination);
     const metadata: QuarantineManifest = {
       schema: 1,
       ...record,
       quarantinedAt: new Date().toISOString(),
     };
-    writeFileSync(
+    safeAtomicWrite(
       join(destination, QUARANTINE_MANIFEST),
       `${JSON.stringify(metadata, null, 2)}\n`,
-      { encoding: "utf8", mode: 0o600 },
+      projectRoot,
     );
   }
 
@@ -163,7 +170,11 @@ export function restoreQuarantined(
   if (existsSync(entry.originalPath)) {
     throw new Error(`Restore destination already exists: ${entry.originalPath}`);
   }
-  mkdirSync(dirname(entry.originalPath), { recursive: true, mode: 0o755 });
+  assertNoSymlinkPath(projectRoot);
+  assertNoSymlinkPath(entry.quarantinePath);
+  assertWithinBoundary(entry.originalPath, projectRoot);
+  ensureSafeDirectory(dirname(entry.originalPath), projectRoot);
+  assertNoSymlinkPath(entry.originalPath);
   renameSync(entry.quarantinePath, entry.originalPath);
   const metadata = join(entry.originalPath, QUARANTINE_MANIFEST);
   if (existsSync(metadata)) unlinkSync(metadata);

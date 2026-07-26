@@ -1,17 +1,16 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { createBriefing, persistBriefing } from "./briefing.js";
 import type { BootstrapConfig } from "./config.js";
 import { detectProject } from "./detection.js";
 import { DiscoveryError, SkillsApi, SkillsCli } from "./discovery.js";
 import { generateSkillSnapshot } from "./generate.js";
-import { installDirectory, installSnapshot } from "./install.js";
-import { alreadyInstalled } from "./inventory.js";
+import { installSnapshot } from "./install.js";
+import { alreadyInstalled, validManagedBinding } from "./inventory.js";
 import { withLock } from "./lock.js";
 import { quarantineManagedSkills } from "./maintenance.js";
-import { statePath } from "./paths.js";
-import { auditAllowed, fallbackAllowed, scoreCandidate } from "./policy.js";
+import { skillRoot, statePath } from "./paths.js";
+import { auditAllowed, scoreCandidate } from "./policy.js";
 import { cacheFresh, cachedSkillIds, markSynced } from "./state.js";
 import type {
   Agent,
@@ -98,14 +97,26 @@ async function discover(
         candidates = await api.search(signal.query);
       } catch (error) {
         const status = error instanceof DiscoveryError ? error.status : undefined;
-        if (options.config.discovery.provider !== "auto" || status !== 401) throw error;
+        if (options.config.discovery.provider !== "auto") throw error;
         warnings.push(
-          "skills.sh API authentication unavailable; using pinned official CLI",
+          status === 401
+            ? "skills.sh API authentication unavailable; using the pinned official CLI for discovery only"
+            : "skills.sh API unavailable; using the pinned official CLI for discovery only",
         );
         provider = "cli";
       }
     }
-    if (provider === "cli") candidates = await cli.search(signal.query);
+    if (provider === "cli") {
+      try {
+        candidates = await cli.search(signal.query);
+      } catch {
+        warnings.push(
+          `skills.sh discovery unavailable for ${signal.technology}; using a safe local fallback`,
+        );
+        unresolved.push(signal);
+        continue;
+      }
+    }
     const candidate = choose(candidates, signal, options.config);
     if (candidate) selected.push({ candidate, provider, signal });
     else unresolved.push(signal);
@@ -128,32 +139,51 @@ async function enrichAndFilter(
   const rejected: DetectionSignal[] = [];
   for (const entry of entries) {
     if (entry.provider === "cli") {
-      if (options.config.mode === "strict") {
-        throw new Error(
-          `Strict mode blocks unaudited CLI fallback candidate ${entry.candidate.id}`,
+      const alreadyAvailable = options.agents.every((agent) =>
+        alreadyInstalled(
+          entry.candidate.id,
+          agent,
+          options.scope,
+          options.root,
+          options.home,
+        ),
+      );
+      if (alreadyAvailable) {
+        warnings.push(
+          `Using existing verified bindings for ${entry.candidate.id}; mutable catalog source was not executed`,
         );
+        accepted.push(entry);
+        continue;
       }
-      if (!fallbackAllowed(entry.candidate, options.config)) {
-        warnings.push(`Skipped untrusted fallback source ${entry.candidate.source}`);
+      warnings.push(
+        `Candidate ${entry.candidate.id} was discovered but not installed because no immutable audited snapshot was available`,
+      );
+      rejected.push(entry.signal);
+      continue;
+    }
+    try {
+      const audits = await api.audits(entry.candidate.id);
+      if (!auditAllowed(audits, options.config)) {
+        warnings.push(`Skipped ${entry.candidate.id}: audit policy rejected it`);
         rejected.push(entry.signal);
         continue;
       }
-      accepted.push(entry);
-      continue;
-    }
-    const audits = await api.audits(entry.candidate.id);
-    if (!auditAllowed(audits, options.config)) {
-      warnings.push(`Skipped ${entry.candidate.id}: audit policy rejected it`);
+      const snapshot = await api.snapshot(entry.candidate.id);
+      if (!snapshot.files || !snapshot.hash) {
+        warnings.push(
+          `Skipped ${entry.candidate.id}: immutable API snapshot is unavailable`,
+        );
+        rejected.push(entry.signal);
+        continue;
+      }
+      accepted.push({ ...entry, snapshot });
+    } catch (error) {
+      if (options.config.discovery.provider !== "auto") throw error;
+      warnings.push(
+        `Skipped ${entry.candidate.id}: API verification was unavailable; using a safe local fallback`,
+      );
       rejected.push(entry.signal);
-      continue;
     }
-    const snapshot = await api.snapshot(entry.candidate.id);
-    if (!snapshot.files) {
-      warnings.push(`Skipped ${entry.candidate.id}: API snapshot is unavailable`);
-      rejected.push(entry.signal);
-      continue;
-    }
-    accepted.push({ ...entry, snapshot });
   }
   return { accepted, rejected };
 }
@@ -201,13 +231,12 @@ function skippedResult(
   };
 }
 
-async function installCatalogEntry(
+function installCatalogEntry(
   entry: Selected,
   options: SyncOptions,
   installed: SyncResult["installed"],
   skipped: SyncResult["skipped"],
-  cli: SkillsCli,
-): Promise<void> {
+): void {
   const missingAgents = options.agents.filter((agent) => {
     const existing = alreadyInstalled(
       entry.candidate.id,
@@ -227,47 +256,49 @@ async function installCatalogEntry(
   });
   if (missingAgents.length === 0 || options.dryRun) return;
 
-  if (entry.snapshot) {
-    for (const agent of missingAgents) {
-      installed.push(
-        installSnapshot(
-          entry.snapshot,
-          entry.candidate,
-          agent,
-          options.scope,
-          options.root,
-          options.home,
-        ),
-      );
-    }
-    return;
-  }
-
-  const temporary = mkdtempSync(join(tmpdir(), "agent-skill-bootstrap-"));
-  try {
-    const sourcePath = await cli.materialize(
-      entry.candidate.source,
-      entry.candidate.slug,
-      temporary,
+  if (!entry.snapshot) {
+    throw new Error(
+      `Refusing mutable catalog installation without a verified snapshot: ${entry.candidate.id}`,
     );
-    if (!existsSync(sourcePath)) {
-      throw new Error(`Official CLI did not produce ${entry.candidate.id}`);
-    }
-    for (const agent of missingAgents) {
-      installed.push(
-        installDirectory(
-          sourcePath,
-          entry.candidate,
-          agent,
-          options.scope,
-          options.root,
-          options.home,
+  }
+  for (const agent of missingAgents) {
+    installed.push(
+      installSnapshot(
+        entry.snapshot,
+        entry.candidate,
+        agent,
+        options.scope,
+        options.root,
+        options.home,
+      ),
+    );
+  }
+}
+
+function cachedBindingsValid(options: SyncOptions, skillIds: string[]): boolean {
+  return skillIds.every((id) =>
+    options.agents.every((agent) => {
+      const existing = alreadyInstalled(
+        id,
+        agent,
+        options.scope,
+        options.root,
+        options.home,
+      );
+      return Boolean(
+        existing &&
+        validManagedBinding(
+          existing.path,
+          {
+            id,
+            agent,
+            scope: existing.scope,
+          },
+          skillRoot(agent, existing.scope, options.root, options.home),
         ),
       );
-    }
-  } finally {
-    rmSync(temporary, { recursive: true, force: true });
-  }
+    }),
+  );
 }
 
 function installGeneratedEntry(
@@ -308,6 +339,7 @@ function installGeneratedEntry(
 async function executeSync(options: SyncOptions): Promise<SyncResult> {
   const detection = detectProject(options.root);
   const briefing = createBriefing(options.root, detection);
+  const cacheIds = cachedSkillIds(options.scope, options.root, options.home);
   if (
     options.hook &&
     !options.force &&
@@ -317,13 +349,10 @@ async function executeSync(options: SyncOptions): Promise<SyncResult> {
       briefing.fingerprint,
       options.config.runtime.cache_ttl_hours,
       options.home,
-    )
+    ) &&
+    cachedBindingsValid(options, cacheIds)
   ) {
-    return skippedResult(
-      detection,
-      briefing,
-      cachedSkillIds(options.scope, options.root, options.home),
-    );
+    return skippedResult(detection, briefing, cacheIds);
   }
 
   const discovery = await discover(options, detection.signals);
@@ -341,10 +370,8 @@ async function executeSync(options: SyncOptions): Promise<SyncResult> {
   );
   const installed: SyncResult["installed"] = [];
   const skipped: SyncResult["skipped"] = [];
-  const cli = options.cli ?? new SkillsCli(options.skillsBinary, options.root);
-
   for (const entry of enrichment.accepted) {
-    await installCatalogEntry(entry, options, installed, skipped, cli);
+    installCatalogEntry(entry, options, installed, skipped);
   }
   for (const entry of generated) {
     installGeneratedEntry(entry, options, installed, skipped);
@@ -391,5 +418,10 @@ export async function syncSkills(options: SyncOptions): Promise<SyncResult> {
     "sync.lock",
   );
   const timeout = options.config.mode === "strict" ? 120_000 : 2_000;
-  return withLock(lockPath, timeout, () => executeSync(options));
+  return withLock(
+    lockPath,
+    timeout,
+    () => executeSync(options),
+    options.scope === "global" ? (options.home ?? homedir()) : options.root,
+  );
 }

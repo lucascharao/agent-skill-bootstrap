@@ -34,9 +34,17 @@ user-level security floor. Automatic API content is accepted only from exact
 user-allowlisted HTTPS origins. Files are staged and validated before an atomic
 directory rename.
 
-Native hooks and strict launcher mode fail closed when project preparation
-cannot complete. The package does not report a host as ready when its hook is
+Native `SessionStart` hooks fail closed when project preparation cannot
+complete. The package does not report a host as ready when its hook is
 missing, disabled, untrusted, or unverifiable.
+
+Official CLI search results without an immutable audited API snapshot are never
+materialized automatically. Existing bindings require a verifiable lock hash;
+new fallback skills are deterministic, instruction-only, and project-local.
+
+Cache entries never establish readiness by themselves. Every cached managed
+binding is revalidated against its exact agent, scope, ownership manifest,
+required files, symlink policy, and content digest.
 
 Automatic maintenance is limited to project skill directories containing a
 valid Agent Skill Bootstrap ownership manifest. Obsolete owned skills are moved

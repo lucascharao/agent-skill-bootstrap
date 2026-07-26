@@ -1,65 +1,57 @@
-import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { join } from "node:path";
 import type { BootstrapConfig } from "./config.js";
+import { safeAtomicWrite } from "./fs-safety.js";
+import { codexHome } from "./paths.js";
 import type { RuntimeInstall } from "./runtime.js";
 import type { Agent, Scope } from "./types.js";
 
-export const MARKER = "agent-skill-bootstrap:owned";
+export const MARKER_PREFIX = "agent-skill-bootstrap:v1";
+
+export function ownershipMarker(scope: Scope, agent: Agent): string {
+  return `${MARKER_PREFIX}:${scope}:${agent}`;
+}
 
 function quote(value: string): string {
-  return `"${value.replaceAll('"', '\\"')}"`;
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function hookCommand(runtime: RuntimeInstall, agent: Agent, scope: Scope): string {
-  return `node ${quote(runtime.cli)} hook --agent ${agent} --scope ${scope} --owner ${MARKER}`;
+function hookCommand(
+  runtime: RuntimeInstall,
+  agent: Agent,
+  scope: Scope,
+  projectRoot: string,
+): string {
+  const root = scope === "project" ? ` --root ${quote(projectRoot)}` : "";
+  return `${quote(runtime.node)} ${quote(runtime.cli)} hook --agent ${agent} --scope ${scope}${root} --owner ${quote(ownershipMarker(scope, agent))}`;
 }
 
-function safeJsonWrite(
+function safeJsonUpdate(
   path: string,
-  mutate: (value: Record<string, unknown>) => void,
-): void {
-  let parent = dirname(path);
-  while (dirname(parent) !== parent) {
-    if (existsSync(parent) && lstatSync(parent).isSymbolicLink()) {
-      throw new Error(`Refusing symlinked hook configuration parent: ${parent}`);
-    }
-    parent = dirname(parent);
-  }
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
-    throw new Error(`Refusing to edit symlinked hook configuration: ${path}`);
-  }
-  const original = existsSync(path) ? readFileSync(path, "utf8") : "{}\n";
+  boundary: string,
+  mutate: (value: Record<string, unknown>) => boolean,
+): boolean {
+  const original = existsSync(path) ? readFileSync(path, "utf8") : null;
   let value: Record<string, unknown>;
   try {
-    value = JSON.parse(original) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(original ?? "{}\n");
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not an object");
+    }
+    value = parsed as Record<string, unknown>;
   } catch {
     throw new Error(`Hook configuration is not valid JSON: ${path}`);
   }
-  const originalHash = createHash("sha256").update(original).digest("hex");
-  mutate(value);
-  const temporary = `${path}.${process.pid}.tmp`;
+  if (!mutate(value)) return false;
   const backup = `${path}.agent-skill-bootstrap.bak`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  const current = existsSync(path) ? readFileSync(path, "utf8") : "{}\n";
-  const currentHash = createHash("sha256").update(current).digest("hex");
-  if (currentHash !== originalHash) {
-    unlinkSync(temporary);
-    throw new Error(`Hook configuration changed during update: ${path}`);
+  if (original !== null) {
+    safeAtomicWrite(backup, original, boundary);
   }
-  if (existsSync(path)) copyFileSync(path, backup);
-  renameSync(temporary, path);
+  safeAtomicWrite(path, `${JSON.stringify(value, null, 2)}\n`, boundary, {
+    expected: original,
+  });
+  return true;
 }
 
 function hookEntry(
@@ -67,14 +59,14 @@ function hookEntry(
   agent: Agent,
   scope: Scope,
   config: BootstrapConfig,
-  event: "SessionStart" | "UserPromptSubmit",
+  projectRoot: string,
 ): Record<string, unknown> {
   return {
-    ...(event === "SessionStart" ? { matcher: "startup|resume|clear|compact" } : {}),
+    matcher: "startup|resume|clear|compact",
     hooks: [
       {
         type: "command",
-        command: hookCommand(runtime, agent, scope),
+        command: hookCommand(runtime, agent, scope, projectRoot),
         timeout: config.runtime.hook_timeout_seconds,
         statusMessage: "Checking project skills",
       },
@@ -84,21 +76,45 @@ function hookEntry(
 
 function addOwnedHook(
   value: Record<string, unknown>,
-  event: "SessionStart" | "UserPromptSubmit",
+  marker: string,
   entry: Record<string, unknown>,
-): void {
+): boolean {
   const hooks =
-    value.hooks && typeof value.hooks === "object"
-      ? (value.hooks as Record<string, unknown>)
-      : {};
-  const current: unknown[] = Array.isArray(hooks[event])
-    ? (hooks[event] as unknown[])
-    : [];
-  hooks[event] = [
-    ...current.filter((item) => !JSON.stringify(item).includes(MARKER)),
-    entry,
-  ];
+    value.hooks === undefined
+      ? {}
+      : value.hooks !== null &&
+          typeof value.hooks === "object" &&
+          !Array.isArray(value.hooks)
+        ? (value.hooks as Record<string, unknown>)
+        : (() => {
+            throw new Error("Hook configuration has invalid hooks");
+          })();
+  if (hooks.SessionStart !== undefined && !Array.isArray(hooks.SessionStart)) {
+    throw new Error("Hook configuration has invalid SessionStart entries");
+  }
+  const current = (hooks.SessionStart ?? []) as unknown[];
+  const filtered = current.filter((item) => !isOwnedEntry(item, marker));
+  hooks.SessionStart = [...filtered, entry];
   value.hooks = hooks;
+  return JSON.stringify(current) !== JSON.stringify(hooks.SessionStart);
+}
+
+function isOwnedEntry(value: unknown, marker: string): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const hooks = (value as Record<string, unknown>).hooks;
+  if (!Array.isArray(hooks)) return false;
+  const suffix = ` --owner ${quote(marker)}`;
+  return hooks.some(
+    (handler) =>
+      handler !== null &&
+      typeof handler === "object" &&
+      !Array.isArray(handler) &&
+      (handler as Record<string, unknown>).type === "command" &&
+      typeof (handler as Record<string, unknown>).command === "string" &&
+      ((handler as Record<string, unknown>).command as string).endsWith(suffix),
+  );
 }
 
 export function hookPath(
@@ -112,8 +128,20 @@ export function hookPath(
     case "claude-code":
       return join(base, ".claude", "settings.json");
     case "codex":
-      return join(base, ".codex", "hooks.json");
+      return scope === "global"
+        ? join(codexHome(home), "hooks.json")
+        : join(base, ".codex", "hooks.json");
   }
+}
+
+function hookBoundary(
+  agent: Agent,
+  scope: Scope,
+  projectRoot: string,
+  home = homedir(),
+): string {
+  if (scope === "project") return projectRoot;
+  return agent === "codex" ? codexHome(home) : home;
 }
 
 export function installHooks(
@@ -127,41 +155,47 @@ export function installHooks(
   const changed: string[] = [];
   for (const agent of agents) {
     const path = hookPath(agent, scope, projectRoot, home);
-    safeJsonWrite(path, (value) => {
-      addOwnedHook(
-        value,
-        "SessionStart",
-        hookEntry(runtime, agent, scope, config, "SessionStart"),
-      );
-      addOwnedHook(
-        value,
-        "UserPromptSubmit",
-        hookEntry(runtime, agent, scope, config, "UserPromptSubmit"),
-      );
-    });
-    changed.push(relative(projectRoot, path));
+    const marker = ownershipMarker(scope, agent);
+    const updated = safeJsonUpdate(
+      path,
+      hookBoundary(agent, scope, projectRoot, home),
+      (value) =>
+        addOwnedHook(
+          value,
+          marker,
+          hookEntry(runtime, agent, scope, config, projectRoot),
+        ),
+    );
+    if (updated) changed.push(path);
   }
   return changed;
 }
 
-export function removeOwnedHook(path: string): boolean {
+export function removeOwnedHook(
+  path: string,
+  agent: Agent,
+  scope: Scope,
+  projectRoot: string,
+  home?: string,
+): boolean {
   if (!existsSync(path)) return false;
-  const original = readFileSync(path, "utf8");
-  const value = JSON.parse(original) as Record<string, unknown>;
-  const hooks = value.hooks as Record<string, unknown> | undefined;
-  if (!hooks) return false;
-  let changed = false;
-  for (const event of ["SessionStart", "UserPromptSubmit"]) {
-    const entries = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-    const filtered = entries.filter((item) => !JSON.stringify(item).includes(MARKER));
-    if (filtered.length !== entries.length) {
-      hooks[event] = filtered;
-      changed = true;
-    }
-  }
-  if (!changed) return false;
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
-  return true;
+  const marker = ownershipMarker(scope, agent);
+  return safeJsonUpdate(
+    path,
+    hookBoundary(agent, scope, projectRoot, home),
+    (value) => {
+      const hooks = value.hooks as Record<string, unknown> | undefined;
+      if (!hooks) return false;
+      let changed = false;
+      for (const event of ["SessionStart", "UserPromptSubmit"]) {
+        const entries = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+        const filtered = entries.filter((item) => !isOwnedEntry(item, marker));
+        if (filtered.length !== entries.length) {
+          hooks[event] = filtered;
+          changed = true;
+        }
+      }
+      return changed;
+    },
+  );
 }

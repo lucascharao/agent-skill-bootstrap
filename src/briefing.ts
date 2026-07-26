@@ -1,12 +1,8 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import { safeAtomicWrite } from "./fs-safety.js";
 import { briefingPath } from "./paths.js";
 import type { ProjectBriefing, ProjectDetection, Scope } from "./types.js";
 
@@ -135,13 +131,11 @@ export function persistBriefing(
   home?: string,
 ): string {
   const path = briefingPath(scope, briefing.root, home);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(briefing, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  renameSync(temporary, path);
+  safeAtomicWrite(
+    path,
+    `${JSON.stringify(briefing, null, 2)}\n`,
+    scope === "global" ? (home ?? homedir()) : briefing.root,
+  );
   return path;
 }
 

@@ -257,28 +257,4 @@ export class SkillsCli {
     const { stdout } = await run(this.node, [this.binary, "find", query], this.cwd);
     return parseCliSearch(stdout, query);
   }
-
-  async materialize(
-    source: string,
-    slug: string,
-    destination: string,
-  ): Promise<string> {
-    await run(
-      this.node,
-      [
-        this.binary,
-        "add",
-        source,
-        "--skill",
-        slug,
-        "--agent",
-        "universal",
-        "--copy",
-        "--yes",
-      ],
-      destination,
-      60_000,
-    );
-    return `${destination}/.agents/skills/${slug}`;
-  }
 }

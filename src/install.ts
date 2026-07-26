@@ -1,8 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  cpSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -10,16 +8,14 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import {
-  dirname,
-  isAbsolute,
-  join,
-  normalize,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
-import { skillRoot } from "./paths.js";
+  assertNoSymlinkPath,
+  assertWithinBoundary,
+  ensureSafeDirectory,
+} from "./fs-safety.js";
+import { codexHome, skillRoot } from "./paths.js";
 import type {
   Agent,
   InstalledSkill,
@@ -54,17 +50,6 @@ export function snapshotDigest(snapshot: SkillSnapshot): string {
   return hash.digest("hex");
 }
 
-function assertNoSymlinkParents(target: string, stopAt: string): void {
-  let current = dirname(target);
-  const boundary = resolve(stopAt);
-  while (current.startsWith(boundary) && current !== boundary) {
-    if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
-      throw new Error(`Refusing symlinked installation path: ${current}`);
-    }
-    current = dirname(current);
-  }
-}
-
 function manifest(
   candidate: SkillCandidate,
   hash: string,
@@ -89,7 +74,8 @@ function manifest(
   )}\n`;
 }
 
-function directoryDigest(root: string): string {
+export function directoryDigest(root: string): string {
+  assertNoSymlinkPath(root, root);
   const hash = createHash("sha256");
   const files: string[] = [];
 
@@ -119,17 +105,27 @@ function directoryDigest(root: string): string {
 function atomicDirectory(
   destination: string,
   root: string,
+  boundary: string,
   populate: (staging: string) => void,
 ): void {
-  mkdirSync(root, { recursive: true, mode: 0o755 });
-  assertNoSymlinkParents(destination, root);
+  assertWithinBoundary(destination, root);
+  assertNoSymlinkPath(root, boundary);
+  ensureSafeDirectory(root, boundary);
+  assertNoSymlinkPath(destination, boundary);
   if (existsSync(destination)) {
     throw new Error(`Destination already exists and is not owned: ${destination}`);
   }
   const staging = join(root, `.agent-skill-bootstrap-${randomUUID()}`);
+  assertWithinBoundary(staging, root);
   mkdirSync(staging, { mode: 0o700 });
   try {
     populate(staging);
+    assertNoSymlinkPath(root, boundary);
+    assertNoSymlinkPath(staging, boundary);
+    assertNoSymlinkPath(destination, boundary);
+    if (existsSync(destination)) {
+      throw new Error(`Destination appeared during installation: ${destination}`);
+    }
     renameSync(staging, destination);
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
@@ -153,14 +149,18 @@ export function installSnapshot(
   }
   const root = skillRoot(agent, scope, projectRoot, home);
   const destination = join(root, candidate.slug);
+  const boundary =
+    scope === "project"
+      ? projectRoot
+      : agent === "codex"
+        ? codexHome(home)
+        : (home ?? homedir());
   const contentHash = snapshotDigest(snapshot);
-  atomicDirectory(destination, root, (staging) => {
+  atomicDirectory(destination, root, boundary, (staging) => {
     for (const file of snapshot.files ?? []) {
       const safe = safeRelativePath(file.path);
       const target = join(staging, safe);
-      if (!resolve(target).startsWith(`${resolve(staging)}${sep}`)) {
-        throw new Error(`Skill file escapes staging directory: ${file.path}`);
-      }
+      assertWithinBoundary(target, staging);
       mkdirSync(dirname(target), { recursive: true, mode: 0o755 });
       writeFileSync(target, file.contents, { encoding: "utf8", mode: 0o644 });
     }
@@ -179,47 +179,6 @@ export function installSnapshot(
     slug: candidate.slug,
     source: candidate.source,
     hash: contentHash,
-    agent,
-    scope,
-    path: destination,
-  };
-}
-
-export function installDirectory(
-  sourcePath: string,
-  candidate: SkillCandidate,
-  agent: Agent,
-  scope: Scope,
-  projectRoot: string,
-  home?: string,
-): InstalledSkill {
-  const skillFile = join(sourcePath, "SKILL.md");
-  if (!existsSync(skillFile) || lstatSync(sourcePath).isSymbolicLink()) {
-    throw new Error(
-      `Official CLI did not materialize a safe SKILL.md for ${candidate.id}`,
-    );
-  }
-  const root = skillRoot(agent, scope, projectRoot, home);
-  const destination = join(root, candidate.slug);
-  const hash = directoryDigest(sourcePath);
-  atomicDirectory(destination, root, (staging) => {
-    cpSync(sourcePath, staging, {
-      recursive: true,
-      dereference: false,
-      errorOnExist: true,
-      filter: (source) => !lstatSync(source).isSymbolicLink(),
-    });
-    writeFileSync(
-      join(staging, ".agent-skill-bootstrap.json"),
-      manifest(candidate, hash, agent, scope),
-      { encoding: "utf8", mode: 0o600 },
-    );
-  });
-  return {
-    id: candidate.id,
-    slug: candidate.slug,
-    source: candidate.source,
-    hash,
     agent,
     scope,
     path: destination,
